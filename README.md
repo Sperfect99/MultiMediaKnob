@@ -2,6 +2,8 @@
 
 A highly configurable, autonomous rotary encoder (**MultiMediaKnob**) built with a Raspberry Pi Pico (CircuitPython) and a sleek PC configurator app (**KnobStudio**) built with Python/CustomTkinter. This project serves as the robust foundation for an expandable media control station.
 
+![Wiring Diagram](images/pico_and_rotary_encoder.png)
+
 
 *The modern, dark-themed KnobStudio app.*
 
