@@ -1,15 +1,17 @@
 # File: KnobStudio
-# Version: 4.0 
+# Version: 7.0 
 # Author: Stylianos Tanellari
 """
-KnobStudio — Shift Layers Edition
+KnobStudio — Advanced Macro Edition
 --------------------------------------------
-Version 5.0 
-- Adds two new action slots per profile:
-  - "Hold + CW" (cw_shifted)
-  - "Hold + CCW" (ccw_shifted)
-- Window is taller to accommodate the new UI elements.
-- Save/Load logic is updated for the new v3.0 config structure.
+Version 7.0 
+- Adds a new Advanced Macro (Sequence) engine.
+- ActionEditor now has 3 tabs:
+  1. Simple Action
+  2. Simple Macro (the old "Advanced Macro" for shortcuts)
+  3. Adv. Macro (Sequence) (a new script-based multi-step engine)
+- UI in ActionEditor is taller (450px) to fit the new text box.
+- Save/Load logic updated to parse/generate macro scripts.
 """
 
 import os
@@ -101,7 +103,7 @@ def send_reboot_command(port_name):
         print("Reboot error:",e); return False
 
 # ====================================================================== #
-#                            ACTION EDITOR                               #
+#                  ACTION EDITOR (Adv. Macro)                   #
 # ====================================================================== #
 
 class ActionEditor(ctk.CTkToplevel):
@@ -111,29 +113,41 @@ class ActionEditor(ctk.CTkToplevel):
         self.result = None
         
         self.title(f"Edit Action (P{profile_num} - {action_key.upper()})")
-        self.geometry("450x300")
+        self.geometry("450x450") # Taller for new tab
         self.transient(parent)
         self.grab_set()
         self.resizable(False, False)
         self.protocol("WM_DELETE_WINDOW", self._on_cancel)
         
-        self.tabs = ctk.CTkTabview(self, width=400, height=240)
+        self.tabs = ctk.CTkTabview(self, width=400, height=390) # Taller
         self.tabs.pack(pady=10, padx=10, fill="both", expand=True)
         self.tabs.add("Simple Action")
-        self.tabs.add("Advanced Macro")
+        self.tabs.add("Simple Macro")
+        self.tabs.add("Adv. Macro (Sequence)") # New Tab
         
+        # --- Tab 1: Simple Action ---
         simple_frame = self.tabs.tab("Simple Action")
         self.simple_tab_var = tk.StringVar()
         ctk.CTkLabel(simple_frame, text="Select a simple HID action:").pack(anchor="w", padx=20, pady=(10,5))
         self.simple_menu = ctk.CTkOptionMenu(simple_frame, values=AVAILABLE_SIMPLE_ACTIONS, variable=self.simple_tab_var, width=300)
         self.simple_menu.pack(anchor="w", padx=20, pady=5)
         
-        macro_frame = self.tabs.tab("Advanced Macro")
+        # --- Tab 2: Simple Macro (Shortcut) ---
+        macro_frame = self.tabs.tab("Simple Macro")
         self.macro_entry_var = tk.StringVar()
         ctk.CTkLabel(macro_frame, text="Enter key combination (e.g., CTRL+SHIFT+T):").pack(anchor="w", padx=20, pady=(10,5))
         self.macro_entry = ctk.CTkEntry(macro_frame, textvariable=self.macro_entry_var, width=300, font=("Consolas", 13))
         self.macro_entry.pack(anchor="w", padx=20, pady=5)
+        ctk.CTkLabel(macro_frame, text="Use this for simple, simultaneous key presses.").pack(anchor="w", padx=20, pady=5)
         ctk.CTkLabel(macro_frame, text="Separate simultaneous keys with '+'.", text_color="gray", font=("Arial", 10)).pack(anchor="w", padx=20)
+        
+        # --- Tab 3: Advanced Macro (Sequence) ---
+        adv_macro_frame = self.tabs.tab("Adv. Macro (Sequence)")
+        ctk.CTkLabel(adv_macro_frame, text="Enter macro sequence (one command per line):").pack(anchor="w", padx=20, pady=(10,5))
+        self.adv_macro_textbox = ctk.CTkTextbox(adv_macro_frame, width=360, height=200, font=("Consolas", 12))
+        self.adv_macro_textbox.pack(anchor="w", padx=20, pady=5, fill="both", expand=True)
+        ctk.CTkLabel(adv_macro_frame, text="Commands: press, release, tap, wait (ms), release_all", text_color="gray", font=("Arial", 10)).pack(anchor="w", padx=20, pady=(0,5))
+
         
         btn_frame = ctk.CTkFrame(self, fg_color="transparent")
         btn_frame.pack(fill="x", padx=10, pady=(0, 10))
@@ -148,15 +162,24 @@ class ActionEditor(ctk.CTkToplevel):
 
     def _load_current_action(self, action_obj):
         try:
-            if action_obj.get("type") == "macro":
-                self.tabs.set("Advanced Macro")
+            action_type = action_obj.get("type", "simple")
+            
+            if action_type == "macro_advanced":
+                self.tabs.set("Adv. Macro (Sequence)")
+                script = self._generate_script_from_steps(action_obj.get("steps", []))
+                self.adv_macro_textbox.insert("1.0", script)
+                
+            elif action_type == "macro":
+                self.tabs.set("Simple Macro")
                 display_keys = []
                 for key in action_obj.get("keys", []):
                     display_keys.append(MODIFIER_DISPLAY_MAP.get(key, key.upper()))
                 self.macro_entry_var.set(" + ".join(display_keys))
-            else:
+                
+            else: # "simple"
                 self.tabs.set("Simple Action")
                 self.simple_tab_var.set(action_obj.get("action", "nothing"))
+                
         except Exception as e:
             print(f"Error loading action: {e}")
 
@@ -168,7 +191,8 @@ class ActionEditor(ctk.CTkToplevel):
                 "type": "simple",
                 "action": self.simple_tab_var.get()
             }
-        elif active_tab == "Advanced Macro":
+        
+        elif active_tab == "Simple Macro":
             macro_string = self.macro_entry_var.get()
             if not macro_string:
                 messagebox.showerror("Error", "Macro string is empty.", parent=self)
@@ -179,9 +203,21 @@ class ActionEditor(ctk.CTkToplevel):
                 messagebox.showerror("Error", "Macro string is invalid.", parent=self)
                 return
             self.result = {
-                "type": "macro",
+                "type": "macro", # Old simple macro
                 "keys": final_keys
             }
+            
+        elif active_tab == "Adv. Macro (Sequence)":
+            script_text = self.adv_macro_textbox.get("1.0", "end-1c")
+            steps, error = self._parse_script_to_steps(script_text)
+            if error:
+                messagebox.showerror("Macro Error", error, parent=self)
+                return
+            self.result = {
+                "type": "macro_advanced", # New advanced macro
+                "steps": steps
+            }
+            
         self.grab_release()
         self.destroy()
 
@@ -190,22 +226,89 @@ class ActionEditor(ctk.CTkToplevel):
         self.grab_release()
         self.destroy()
 
+    # --- v7.0 Macro Scripting Helpers ---
+    def _parse_script_to_steps(self, script_text):
+        steps = []
+        lines = script_text.splitlines()
+        for i, line in enumerate(lines):
+            line_num = i + 1
+            line = line.strip()
+            if not line or line.startswith('#'):
+                continue
+            
+            parts = line.lower().split(maxsplit=1)
+            command = parts[0]
+            args_str = parts[1] if len(parts) > 1 else ""
+            
+            try:
+                if command == "wait":
+                    delay_ms = int(args_str)
+                    steps.append({"wait": delay_ms / 1000.0}) # Convert ms to seconds
+                
+                elif command in ["press", "tap", "release"]:
+                    if not args_str:
+                        return None, f"Error on line {line_num}: '{command}' needs at least one key."
+                    raw_keys = args_str.split('+')
+                    final_keys = [normalize_key_name(key) for key in raw_keys if key.strip()]
+                    if not final_keys:
+                        return None, f"Error on line {line_num}: Invalid keys for '{command}'."
+                    steps.append({command: final_keys})
+                    
+                elif command == "release_all":
+                    steps.append({"release_all": True})
+                    
+                else:
+                    return None, f"Error on line {line_num}: Unknown command '{command}'."
+            
+            except Exception as e:
+                return None, f"Error parsing line {line_num} ('{line}'): {e}"
+                
+        return steps, None
+
+    def _generate_script_from_steps(self, steps):
+        script_lines = []
+        for step in steps:
+            try:
+                if "wait" in step:
+                    delay_ms = int(step["wait"] * 1000) # Convert seconds to ms
+                    script_lines.append(f"wait {delay_ms}")
+                    
+                elif "press" in step:
+                    keys = [MODIFIER_DISPLAY_MAP.get(k, k.upper()) for k in step["press"]]
+                    script_lines.append(f"press {" + ".join(keys)}")
+                    
+                elif "tap" in step:
+                    keys = [MODIFIER_DISPLAY_MAP.get(k, k.upper()) for k in step["tap"]]
+                    script_lines.append(f"tap {" + ".join(keys)}")
+                    
+                elif "release" in step:
+                    keys = [MODIFIER_DISPLAY_MAP.get(k, k.upper()) for k in step["release"]]
+                    script_lines.append(f"release {" + ".join(keys)}")
+                    
+                elif "release_all" in step and step["release_all"]:
+                    script_lines.append("release_all")
+                    
+            except Exception as e:
+                script_lines.append(f"# ERROR generating line for step: {step} ({e})")
+                
+        return "\n".join(script_lines)
+
 # ====================================================================== #
-#                         MAIN UI CLASS (v5.0)                         #
+#               MAIN UI CLASS (Adv. Macro)                #
 # ====================================================================== #
 class MultiKnobConfiguratorModern:
     
     def __init__(self, root):
         self.root = root
-        self.root.title("KnobStudio — v5.0")
+        self.root.title("KnobStudio — v7.0 (Advanced Macro)") # v7.0
         ctk.set_appearance_mode("Dark")
         try:
             ctk.set_default_color_theme("green")
         except Exception:
             pass
-        # --- v5.0 Change: Window is taller to fit new rows ---
-        self.root.geometry("1000x640") # Was 560
-        self.root.minsize(980, 640)
+        # --- Window is taller to fit new rows ---
+        self.root.geometry("1000x720") # Was 640
+        self.root.minsize(980, 720)   # Was 640
         
         self.profile_vars = {}
         self.action_labels = {}
@@ -225,7 +328,7 @@ class MultiKnobConfiguratorModern:
         self.bottom_bar()
         self.root.protocol("WM_DELETE_WINDOW", self.root.destroy)
 
-    # ---------------- LEFT (v5.0 UPDATE) ----------------
+    # ---------------- LEFT ----------------
     def build_left(self):
         ctk.CTkLabel(self.left, text="KnobStudio", font=ctk.CTkFont(size=18, weight="bold")).pack(anchor="w", padx=14, pady=(10, 6))
         
@@ -265,7 +368,7 @@ class MultiKnobConfiguratorModern:
         self.sens_mouse_label.configure(text=f"{self.sens_mouse.get()}x")
         
         
-        # --- Tabs (v5.0 UPDATE) ---
+        # --- Tabs ---
         self.tabs = ctk.CTkTabview(self.left)
         self.tabs.pack(fill="both", expand=True, padx=12, pady=8)
         
@@ -276,29 +379,35 @@ class MultiKnobConfiguratorModern:
             tab.grid_columnconfigure(2, weight=0)
             
             profile_key = f"profile{i}"
-            # v5.0: Load new default keys
+            # Load new default keys
             self.profile_vars[i] = self.current_settings.get(profile_key, {
                 'cw': DEFAULT_ACTION_OBJECT, 'ccw': DEFAULT_ACTION_OBJECT,
-                'click': DEFAULT_ACTION_OBJECT, 'long_press': DEFAULT_ACTION_OBJECT,
+                'click': DEFAULT_ACTION_OBJECT,
+                'double_click': DEFAULT_ACTION_OBJECT, # New
+                'triple_click': DEFAULT_ACTION_OBJECT, # New
+                'long_press': DEFAULT_ACTION_OBJECT,
                 'cw_shifted': DEFAULT_ACTION_OBJECT, 'ccw_shifted': DEFAULT_ACTION_OBJECT # New
             })
             
             self.action_labels[i] = {}
             
-            # v5.0: Add new rows
+            # Add new rows
             self._profile_row(tab, i, "Clockwise (CW):", "cw", 0)
             self._profile_row(tab, i, "Counter-CW (CCW):", "ccw", 1)
             self._profile_row(tab, i, "Click:", "click", 2)
-            self._profile_row(tab, i, "Long Press:", "long_press", 3)
             # --- New Rows ---
-            self._profile_row(tab, i, "Hold + CW:", "cw_shifted", 4, is_new=True)
-            self._profile_row(tab, i, "Hold + CCW:", "ccw_shifted", 5, is_new=True)
+            self._profile_row(tab, i, "Double Click:", "double_click", 3)
+            self._profile_row(tab, i, "Triple Click:", "triple_click", 4)
+            # ---
+            self._profile_row(tab, i, "Long Press:", "long_press", 5)
+            # --- Shift Rows ---
+            self._profile_row(tab, i, "Hold + CW:", "cw_shifted", 6, is_new=True)
+            self._profile_row(tab, i, "Hold + CCW:", "ccw_shifted", 7, is_new=True)
         
         self.tabs.set("Profile 1")
 
-    # (v5.0 UPDATE)
     def _profile_row(self, tab, profile_index, label_text, action_key, row, is_new=False):
-        # Add a subtle top padding for the new "Hold" rows
+        # Add a subtle top padding for the "Hold" rows
         pady_val = (12 if is_new else (10 if row == 0 else 8), 8)
         
         ctk.CTkLabel(tab, text=label_text).grid(row=row, column=0, sticky="w", padx=10, pady=pady_val)
@@ -316,10 +425,13 @@ class MultiKnobConfiguratorModern:
                                  command=lambda p=profile_index, k=action_key: self.open_action_editor(p, k))
         edit_btn.grid(row=row, column=2, sticky="e", padx=10, pady=pady_val)
 
-
+    # --- v7.0 Update: Handle 'macro_advanced' ---
     def _get_action_display_text(self, action_obj):
         try:
-            if action_obj.get("type") == "macro":
+            action_type = action_obj.get("type", "simple")
+            if action_type == "macro_advanced":
+                return "Macro: [Advanced Sequence]"
+            elif action_type == "macro":
                 keys = action_obj.get("keys", [])
                 display_keys = [MODIFIER_DISPLAY_MAP.get(k, k.upper()) for k in keys]
                 return f"Macro: {' + '.join(display_keys)}"
@@ -354,12 +466,12 @@ class MultiKnobConfiguratorModern:
         self.save_btn=ctk.CTkButton(pf,text="Save & Reboot Pico",command=self.save_thread)
         self.save_btn.pack(fill="x",padx=10,pady=(4,10))
 
-    # --- BOTTOM (v5.0) ---
+    # --- BOTTOM (v7.0) ---
     def bottom_bar(self):
         bar=ctk.CTkFrame(self.root,height=28,corner_radius=0); bar.pack(fill="x",side="bottom")
-        self.status=tk.StringVar(value="Ready (v5.0).")
+        self.status=tk.StringVar(value="Ready (v7.0).")
         ctk.CTkLabel(bar,textvariable=self.status,anchor="w").pack(side="left",padx=10)
-        ctk.CTkLabel(bar,text="Shift Layer Edition",anchor="e").pack(side="right",padx=10)
+        ctk.CTkLabel(bar,text="Advanced Macro Edition",anchor="e").pack(side="right",padx=10)
 
     # --- Threads  ---
     def save_thread(self):
@@ -387,7 +499,7 @@ class MultiKnobConfiguratorModern:
         self.root.after(0,_)
     def set_status(self,text): self.root.after(0,lambda:self.status.set(text))
 
-    # --- SAVE LOGIC (v5.0 UPDATE) ---
+    # --- SAVE LOGIC ---
     def _save_and_reboot(self):
         try:
             self.set_status("Finding CIRCUITPY..."); self.log_add("Finding drive...")
@@ -403,7 +515,7 @@ class MultiKnobConfiguratorModern:
             s_scr = self._safe_int(self.sens_scr.get(), 1)
             s_mouse = self._safe_int(self.sens_mouse.get(), 4)
             
-            # v5.0: profile_vars now contains all 6 keys, so this is fine
+            # v6.0: profile_vars now contains all 8 keys, so this is fine
             p1 = self.profile_vars.get(1, {})
             p2 = self.profile_vars.get(2, {})
             p3 = self.profile_vars.get(3, {})
@@ -421,13 +533,13 @@ class MultiKnobConfiguratorModern:
                 "sensitivity_volume": s_vol,
                 "sensitivity_scroll": s_scr,
                 "sensitivity_mouse": s_mouse,
-                "profiles": [p1, p2, p3] # These dicts now contain all 6 keys
+                "profiles": [p1, p2, p3] # These dicts now contain all 8 keys
             }
             
             with open(json_path, "w", encoding="utf-8") as f:
                 json.dump(cfg, f, indent=2, ensure_ascii=False)
             
-            # v5.0: Save all 6 keys to the local cache too
+            # Save all 8 keys to the local cache too
             self.save_gui_settings(p1, p2, p3, s_vol, s_scr, s_mouse)
             self.log_add("File saved."); self.set_status("Finishing write...")
             
@@ -463,13 +575,13 @@ class MultiKnobConfiguratorModern:
         self.root.after(0,lambda:self.reboot_port_label.configure(text=f"Reboot port: {port if port else '—'}"))
         self.set_status("Ready.")
 
-    # --- Helpers (v5.0 UPDATE) ---
+    # --- Helpers ---
     @staticmethod
     def _safe_int(v, default):
         try: return int(v)
         except: return default
     
-    # v5.0: save_gui_settings is unchanged, as p1,p2,p3 already contain the new keys
+    # save_gui_settings is unchanged, as p1,p2,p3 already contain the new keys
     def save_gui_settings(self, p1, p2, p3, sv, ss, sm):
         data = {
             'profile1': p1, 'profile2': p2, 'profile3': p3,
@@ -482,12 +594,15 @@ class MultiKnobConfiguratorModern:
         except Exception as e:
             self.log_add(f"Error saving GUI settings: {e}")
 
-    # v5.0: load_gui_settings now loads defaults for 6 keys
+    # load_gui_settings now loads defaults for 8 keys
     def load_gui_settings(self):
-        # Define the full v3.0 default profile
+        # Define the full default profile
         default_p_base = {
             'cw': DEFAULT_ACTION_OBJECT, 'ccw': DEFAULT_ACTION_OBJECT,
-            'click': DEFAULT_ACTION_OBJECT, 'long_press': DEFAULT_ACTION_OBJECT,
+            'click': DEFAULT_ACTION_OBJECT,
+            'double_click': DEFAULT_ACTION_OBJECT, # New
+            'triple_click': DEFAULT_ACTION_OBJECT, # New
+            'long_press': DEFAULT_ACTION_OBJECT,
             'cw_shifted': DEFAULT_ACTION_OBJECT, 'ccw_shifted': DEFAULT_ACTION_OBJECT
         }
         
@@ -514,18 +629,27 @@ class MultiKnobConfiguratorModern:
                 
                 # Check what version the config is and migrate if needed
                 if isinstance(loaded_data.get('profile1', {}).get('cw'), str):
-                    self.log_add("Old v1.0 config found. Migrating to v3.0...")
-                    d = self._migrate_v1_to_v3(loaded_data)
+                    self.log_add("Old v1.0 config found. Migrating to v4.0...")
+                    d = self._migrate_v1_to_v4(loaded_data)
                 elif 'cw_shifted' not in loaded_data.get('profile1', {}):
-                    self.log_add("v2.0 (Mouse) config found. Migrating to v3.0 (Shift)...")
+                    self.log_add("v2.0 (Mouse) config found. Migrating to v4.0 (Shift+MultiClick)...")
                     d.update(loaded_data) # Load v2 data
                     # Add new keys to profiles
                     for i in (1, 2, 3):
                         d[f'profile{i}'].setdefault('cw_shifted', DEFAULT_ACTION_OBJECT)
                         d[f'profile{i}'].setdefault('ccw_shifted', DEFAULT_ACTION_OBJECT)
+                        d[f'profile{i}'].setdefault('double_click', DEFAULT_ACTION_OBJECT)
+                        d[f'profile{i}'].setdefault('triple_click', DEFAULT_ACTION_OBJECT)
+                elif 'double_click' not in loaded_data.get('profile1', {}):
+                    self.log_add("v3.0 (Shift) config found. Migrating to v4.0 (MultiClick)...")
+                    d.update(loaded_data) # Load v3 data
+                    # Add new keys to profiles
+                    for i in (1, 2, 3):
+                        d[f'profile{i}'].setdefault('double_click', DEFAULT_ACTION_OBJECT)
+                        d[f'profile{i}'].setdefault('triple_click', DEFAULT_ACTION_OBJECT)
                 else:
                     d.update(loaded_data)
-                    self.log_add("Loaded v3.0+ (Shift) config settings.")
+                    self.log_add("Loaded v4.0+ (MultiClick / Adv. Macro) config settings.") # v7.0 Log
                     
         except FileNotFoundError:
             self.log_add("No settings file found. Loading defaults.")
@@ -533,9 +657,9 @@ class MultiKnobConfiguratorModern:
             self.log_add(f"Error loading settings: {e}. Loading defaults.")
         return d
 
-    # v5.0: This migrates from the very first version (v1)
-    def _migrate_v1_to_v3(self, v1_data):
-        v3_data = {
+    # v6.0: This migrates from the very first version (v1) to v4 (multi-click)
+    def _migrate_v1_to_v4(self, v1_data):
+        v4_data = {
             'sensitivity_volume': v1_data.get('sensitivity_volume', 2),
             'sensitivity_scroll': v1_data.get('sensitivity_scroll', 1),
             'sensitivity_mouse': 4 # Add mouse default
@@ -544,19 +668,23 @@ class MultiKnobConfiguratorModern:
         for i in (1, 2, 3):
             profile_key = f'profile{i}'
             v1_profile = v1_data.get(profile_key, {})
-            v3_profile = {}
+            v4_profile = {}
             for action_key in ("cw", "ccw", "click", "long_press"):
                 action_name = v1_profile.get(action_key, "nothing")
-                v3_profile[action_key] = {
+                v4_profile[action_key] = {
                     "type": "simple",
                     "action": action_name
                 }
             # Add new shift keys
-            v3_profile['cw_shifted'] = DEFAULT_ACTION_OBJECT
-            v3_profile['ccw_shifted'] = DEFAULT_ACTION_OBJECT
-            v3_data[profile_key] = v3_profile
+            v4_profile['cw_shifted'] = DEFAULT_ACTION_OBJECT
+            v4_profile['ccw_shifted'] = DEFAULT_ACTION_OBJECT
+            # Add new multi-click keys
+            v4_profile['double_click'] = DEFAULT_ACTION_OBJECT
+            v4_profile['triple_click'] = DEFAULT_ACTION_OBJECT
             
-        return v3_data
+            v4_data[profile_key] = v4_profile
+            
+        return v4_data
 
 # --- Run ---
 if __name__ == "__main__":
@@ -568,4 +696,3 @@ if __name__ == "__main__":
     root = ctk.CTk()
     app = MultiKnobConfiguratorModern(root)
     root.mainloop()
-
