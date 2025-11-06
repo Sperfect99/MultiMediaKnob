@@ -14,12 +14,23 @@ from adafruit_hid.mouse import Mouse
 import traceback
 import storage
 
-print("--- Multi-Knob v13.0 ---")
+print("--- Multi-Knob v15.0 (Advanced Macro) ---")
 
 # --- Pins ---
 encoder_clk = board.GP13
 encoder_dt = board.GP14
 encoder_sw = board.GP15
+
+# +++++++++++++++++++++++++++++++++++++++++++++++++++++++
+# +++ FIX FOR BIOS/UEFI HANG +++
+#
+# We add a 5-second pause.
+# This gives the PC time to finish POST (Power-On Self Test)
+# before the Pico announces itself as a composite HID device.
+print("[SYSTEM] Waiting 5 seconds for PC POST...")
+time.sleep(5.0) 
+print("[SYSTEM] Initializing HID devices...")
+# +++++++++++++++++++++++++++++++++++++++++++++++++++++++
 
 # --- HID Init ---
 try:
@@ -48,10 +59,36 @@ sensitivity_mouse = 4
 
 # --- Profile Switching ---
 def save_current_profile_index(index):
-    global profiles_data
-    if not profiles_data or "current_profile" not in profiles_data:
+    global profiles_data, CONFIG_FILE
+    # 1. Update the current state in memory
+    current_index_plus_one = index + 1
+    if "current_profile" in profiles_data:
+        profiles_data["current_profile"] = current_index_plus_one
+    else:
+        # Don't try to save if the initial config was corrupted
+        print("[FS] 'current_profile' key not found, cannot save.")
         return
-    profiles_data["current_profile"] = index + 1
+
+    # 2. Save it permanently to profiles.json
+    try:
+        # Make the filesystem writable
+        storage.remount("/", readonly=False)
+        
+        # Write the updated dict back to the file
+        with open(CONFIG_FILE, "w") as f:
+            json.dump(profiles_data, f, indent=2)
+        
+        # Make the filesystem read-only again
+        storage.remount("/", readonly=True)
+        print(f"[FS] Saved Profile {current_index_plus_one} as default.")
+        
+    except Exception as e:
+        print(f"[FS] ERROR saving profile: {e}")
+        # Even if it fails, leave it read-only
+        try:
+            storage.remount("/", readonly=True)
+        except:
+            pass
 
 def switch_profile(target_index):
     global current_profile_index
@@ -77,7 +114,7 @@ def _mouse_scroll_v_neg(): mouse.move(wheel=-1)
 def _mouse_scroll_h_pos(): mouse.move(wheel=1, horizontal=True)
 def _mouse_scroll_h_neg(): mouse.move(wheel=-1, horizontal=True)
 
-# --- HID Actions MAP (v12.1 List) ---
+# --- HID Actions MAP ---
 SIMPLE_ACTIONS_MAP = {
     "nothing": lambda: None,
     "volume_up": lambda: cc.send(ConsumerControlCode.VOLUME_INCREMENT),
@@ -108,7 +145,7 @@ SIMPLE_ACTIONS_MAP = {
 }
 AVAILABLE_ACTIONS = list(SIMPLE_ACTIONS_MAP.keys())
 
-# --- KEYNAME_TO_KEYCODE Map (v11.1) ---
+# --- KEYNAME_TO_KEYCODE Map ---
 KEYNAME_TO_KEYCODE = {
     # Modifiers
     "LEFT_CONTROL": Keycode.LEFT_CONTROL, "CONTROL": Keycode.LEFT_CONTROL, "CTRL": Keycode.LEFT_CONTROL,
@@ -151,24 +188,24 @@ KEYNAME_TO_KEYCODE = {
     "INSERT": Keycode.INSERT,
 }
 
-# --- Config Loading (v13.0) ---
+# --- Config Loading ---
 CONFIG_FILE = "/profiles.json"
 DEFAULT_ACTION_OBJECT = {"type": "simple", "action": "nothing"}
 
-# --- v13.0: Added cw_shifted and ccw_shifted to defaults ---
+# --- Added double_click and triple_click to defaults ---
 default_profiles = {
     "current_profile": 1,
     "sensitivity_volume": 2,
     "sensitivity_scroll": 1,
     "sensitivity_mouse": 4, 
     "profiles": [
-        {"cw": {"type": "simple", "action": "volume_up"}, "ccw": {"type": "simple", "action": "volume_down"}, "click": {"type": "simple", "action": "mute"}, "long_press": {"type": "simple", "action": "next_profile"}, "cw_shifted": DEFAULT_ACTION_OBJECT, "ccw_shifted": DEFAULT_ACTION_OBJECT},
-        {"cw": {"type": "simple", "action": "scroll_up"}, "ccw": {"type": "simple", "action": "scroll_down"}, "click": {"type": "simple", "action": "play_pause"}, "long_press": DEFAULT_ACTION_OBJECT, "cw_shifted": DEFAULT_ACTION_OBJECT, "ccw_shifted": DEFAULT_ACTION_OBJECT},
-        {"cw": {"type": "simple", "action": "mouse_scroll_v_pos"}, "ccw": {"type": "simple", "action": "mouse_scroll_v_neg"}, "click": {"type": "simple", "action": "mouse_click_middle"}, "long_press": DEFAULT_ACTION_OBJECT, "cw_shifted": {"type": "simple", "action": "mouse_scroll_h_pos"}, "ccw_shifted": {"type": "simple", "action": "mouse_scroll_h_neg"}}
+        {"cw": {"type": "simple", "action": "volume_up"}, "ccw": {"type": "simple", "action": "volume_down"}, "click": {"type": "simple", "action": "mute"}, "double_click": DEFAULT_ACTION_OBJECT, "triple_click": DEFAULT_ACTION_OBJECT, "long_press": {"type": "simple", "action": "next_profile"}, "cw_shifted": DEFAULT_ACTION_OBJECT, "ccw_shifted": DEFAULT_ACTION_OBJECT},
+        {"cw": {"type": "simple", "action": "scroll_up"}, "ccw": {"type": "simple", "action": "scroll_down"}, "click": {"type": "simple", "action": "play_pause"}, "double_click": DEFAULT_ACTION_OBJECT, "triple_click": DEFAULT_ACTION_OBJECT, "long_press": DEFAULT_ACTION_OBJECT, "cw_shifted": DEFAULT_ACTION_OBJECT, "ccw_shifted": DEFAULT_ACTION_OBJECT},
+        {"cw": {"type": "simple", "action": "mouse_scroll_v_pos"}, "ccw": {"type": "simple", "action": "mouse_scroll_v_neg"}, "click": {"type": "simple", "action": "mouse_click_middle"}, "double_click": DEFAULT_ACTION_OBJECT, "triple_click": DEFAULT_ACTION_OBJECT, "long_press": DEFAULT_ACTION_OBJECT, "cw_shifted": {"type": "simple", "action": "mouse_scroll_h_pos"}, "ccw_shifted": {"type": "simple", "action": "mouse_scroll_h_neg"}}
     ]
 }
 
-def is_valid_v3_config(config):
+def is_valid_v4_config(config):
     try:
         
         if not ("current_profile" in config and "sensitivity_volume" in config and
@@ -176,16 +213,16 @@ def is_valid_v3_config(config):
                 "profiles" in config and
                 isinstance(config["profiles"], list) and len(config["profiles"]) >= 3):
             return False
+        
+        # This validator is now more flexible.
+        # It just checks that the *structure* is valid, not the *content* of the action.
         for profile in config["profiles"]:
-            # Check for ALL 6 action keys
-            for key in ("cw", "ccw", "click", "long_press", "cw_shifted", "ccw_shifted"):
+            # Check for ALL 8 action keys
+            for key in ("cw", "ccw", "click", "double_click", "triple_click", "long_press", "cw_shifted", "ccw_shifted"):
                 action_obj = profile.get(key)
                 if not (isinstance(action_obj, dict) and "type" in action_obj): return False
-                # Validate the action object itself
-                if action_obj["type"] == "simple":
-                    if not "action" in action_obj: return False
-                elif action_obj["type"] == "macro":
-                    if not ("keys" in action_obj and isinstance(action_obj["keys"], list)): return False
+                # We no longer validate the content (e.g. "action" vs "keys" vs "steps")
+                # as the execute_hid_action will handle "unknown" types gracefully.
         return True # All checks passed
     except Exception as e:
         print(f"[VALIDATE] Error: {e}"); return False
@@ -193,9 +230,9 @@ def is_valid_v3_config(config):
 try:
     with open(CONFIG_FILE, "r") as f:
         loaded_data = json.load(f)
-        if is_valid_v3_config(loaded_data):
+        if is_valid_v4_config(loaded_data):
             profiles_data = loaded_data
-            print(f"[FS] Loaded valid config v3.0+ (Shift) from {CONFIG_FILE}")
+            print(f"[FS] Loaded valid config v4.0+ (MultiClick/Adv. Macro) from {CONFIG_FILE}")
         else:
             print(f"[FS] Invalid/Old structure in {CONFIG_FILE}. Upgrading...")
             # This is a simple migration, just assumes defaults for missing keys
@@ -207,6 +244,8 @@ try:
             for i in range(3):
                 base_data["profiles"][i].setdefault("cw_shifted", DEFAULT_ACTION_OBJECT)
                 base_data["profiles"][i].setdefault("ccw_shifted", DEFAULT_ACTION_OBJECT)
+                base_data["profiles"][i].setdefault("double_click", DEFAULT_ACTION_OBJECT)
+                base_data["profiles"][i].setdefault("triple_click", DEFAULT_ACTION_OBJECT)
             profiles_data = base_data
             print("[FS] Upgrade complete. Using migrated config.")
             
@@ -242,10 +281,16 @@ button_state = 0 # 0=Released, 1=Pressed(awaiting action), 2=LongPressed(awaitin
 button_press_time = 0.0
 LONG_PRESS_THRESHOLD = 0.8
 
-# --- execute_hid_action (v12.1) ---
+# --- Multi-Click Vars ---
+click_count = 0
+last_release_time = 0.0
+MULTI_CLICK_TIMEOUT = 0.3 # 300ms window for multi-clicks
+
+
+# --- execute_hid_action (Adv. Macro) ---
 def execute_hid_action(action_key):
     global current_profile_index, profiles_data, SIMPLE_ACTIONS_MAP, KEYNAME_TO_KEYCODE
-    global sensitivity_volume, sensitivity_scroll
+    global sensitivity_volume, sensitivity_scroll, kbd
     
     try:
         profile = profiles_data["profiles"][current_profile_index]
@@ -275,6 +320,7 @@ def execute_hid_action(action_key):
                     time.sleep(delay_per_step)
 
         elif action_type == "macro":
+            # --- SUPPORT FOR OLD, SIMPLE MACRO (Shortcut) ---
             keys_to_press = action_obj.get("keys", [])
             keycodes = []
             for key_name in keys_to_press:
@@ -290,15 +336,66 @@ def execute_hid_action(action_key):
                     time.sleep(0.01)
                     kbd.release_all()
                 except Exception as e:
-                    print(f"[MACROC] Error: {e}")
+                    print(f"[MACRO] Error: {e}")
                     kbd.release_all()
+        
+        elif action_type == "macro_advanced":
+            # --- NEW, ADVANCED MACRO ENGINE ---
+            steps = action_obj.get("steps", [])
+            if not steps: print("[MACRO_ADV] 'steps' list is empty.")
+            
+            try:
+                for step in steps:
+                    if "press" in step:
+                        # Presses and holds the keys
+                        key_names = step["press"]
+                        keycodes = [KEYNAME_TO_KEYCODE.get(k) for k in key_names if KEYNAME_TO_KEYCODE.get(k)]
+                        if keycodes: kbd.press(*keycodes)
+                            
+                    elif "release" in step:
+                        # Releases specific keys
+                        key_names = step["release"]
+                        keycodes = [KEYNAME_TO_KEYCODE.get(k) for k in key_names if KEYNAME_TO_KEYCODE.get(k)]
+                        if keycodes: kbd.release(*keycodes)
+                        
+                    elif "tap" in step:
+                        # Presses and releases immediately (like typing)
+                        key_names = step["tap"]
+                        keycodes = [KEYNAME_TO_KEYCODE.get(k) for k in key_names if KEYNAME_TO_KEYCODE.get(k)]
+                        if keycodes:
+                            kbd.press(*keycodes)
+                            time.sleep(0.01) # Short pause to register the press
+                            kbd.release(*keycodes)
+                            
+                    elif "wait" in step:
+                        # Waits for X seconds (e.g., 0.05 = 50ms)
+                        try:
+                            delay = float(step["wait"])
+                            time.sleep(delay)
+                        except:
+                            print(f"[MACRO_ADV] Invalid wait value: {step['wait']}")
+                            
+                    elif "release_all" in step and step["release_all"]:
+                        # Releases ALL keys that might be held
+                        kbd.release_all()
+                        
+                    time.sleep(0.01) # Short pause between steps
+            
+            except Exception as e:
+                print(f"[MACRO_ADV] Error executing steps: {e}")
+                kbd.release_all() # Safety: Release everything on error
+            
+            # Final safety: At the end of the macro, ensure all are released
+            kbd.release_all()
+
 
     except Exception as e:
         print(f"ERROR executing action '{action_key}': {e}")
         traceback.print_exception(e)
+        kbd.release_all() # General safety
 
 
-# --- Main Loop (v13.0) ---
+# --- Main Loop ---
 print(f"--- Ready (Profile {current_profile_index + 1}, Vol: {sensitivity_volume}x, Scroll: {sensitivity_scroll}x, Mouse: {sensitivity_mouse}x) ---")
 serial_port = usb_cdc.data
 
@@ -307,7 +404,7 @@ while True:
     current_position = encoder.position
     button_is_pressed = not button_sw.value
 
-    # --- 1. Check Serial (Unchanged) ---
+    # --- 1. Check Serial  ---
     if serial_port and serial_port.connected and serial_port.in_waiting > 0:
         try:
             raw_data = bytearray()
@@ -321,6 +418,19 @@ while True:
 
     # --- 2. Button State Machine ---
     try:
+        # --- Part A: Check for expired multi-click timer ---
+        # This only runs when the button is RELEASED (state 0) and clicks are pending
+        if button_state == 0 and click_count > 0 and (current_time - last_release_time) > MULTI_CLICK_TIMEOUT:
+            if click_count == 1:
+                execute_hid_action("click")
+            elif click_count == 2:
+                execute_hid_action("double_click")
+            # Triple-click is handled on immediate press, but a fallback is safe.
+            elif click_count == 3: 
+                execute_hid_action("triple_click")
+            click_count = 0 # Reset count
+
+        # --- Part B: Main State Machine ---
         if button_state == 0: # State 0: Released
             if button_is_pressed:
                 # Button was just pressed, start timer
@@ -329,16 +439,24 @@ while True:
             else:
                 # Button is not pressed, check for normal rotation
                 if current_position != last_position:
-                    action_key = "cw" if current_position > last_position else "ccw"
-                    execute_hid_action(action_key)
+                    # Only rotate if no clicks are pending
+                    if click_count == 0: 
+                        action_key = "cw" if current_position > last_position else "ccw"
+                        execute_hid_action(action_key)
                     last_position = current_position
 
         elif button_state == 1: # State 1: Pressed, awaiting action
             if not button_is_pressed:
-                # --- Button was RELEASED (Short Click) ---
-                # It wasn't held long enough for long_press, and no rotation happened
-                execute_hid_action("click")
+                # --- Button was RELEASED (Potential Click) ---
+                # This was a short press (not long press, not shift)
                 button_state = 0 # Go back to released state
+                click_count += 1
+                last_release_time = current_time
+                
+                # If this is the 3rd click, execute immediately
+                if click_count == 3:
+                    execute_hid_action("triple_click")
+                    click_count = 0 # Reset
             else:
                 # --- Button is STILL HELD ---
                 # Check for SHIFTED rotation *first*
@@ -347,11 +465,13 @@ while True:
                     execute_hid_action(action_key)
                     last_position = current_position
                     button_state = 3 # Go to "Shifted" state
+                    click_count = 0 # Cancel any pending clicks
                 
                 # If no rotation, check for LONG PRESS
                 elif (current_time - button_press_time) >= LONG_PRESS_THRESHOLD:
                     execute_hid_action("long_press")
                     button_state = 2 # Go to "Long Press Done" state
+                    click_count = 0 # Cancel any pending clicks
         
         elif button_state == 2: # State 2: Long Press Done, waiting for release
             if not button_is_pressed:
@@ -373,4 +493,3 @@ while True:
         time.sleep(0.5)
 
     time.sleep(0.01)
-
