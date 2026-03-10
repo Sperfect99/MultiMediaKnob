@@ -6,6 +6,8 @@ This project has evolved from a simple media controller into a powerful control 
 
 ![Wiring Diagram](images/pico_and_rotary_encoder.png)
 
+![UI](images/UI.png)
+
 *The modern, dark-themed KnobStudio app.*
 
 ---
@@ -15,12 +17,14 @@ This project has evolved from a simple media controller into a powerful control 
 * **⚡ Autonomous HID:** The knob works as a standalone USB device (Keyboard, Media Controller, **and Mouse**) without any PC software running in the background.
 * **💨 Zero Lag:** By acting as a native HID, all actions (volume, scroll) are instant, with no lag or buffering.
 * **🚦 3 Profiles + Shift Layers:** Switch between three independent profiles. Each profile now has **two "layers"**, giving you 6 distinct rotation actions.
+* **🐧 Native Linux Support (NEW):** A dedicated Linux version of KnobStudio with smart `CIRCUITPY` drive detection (handling KDE/Fedora automounts) and automated `dialout` permission checks.
+* **🛡️ Bulletproof Reliability (v7.1 Refactor):** Hardware debouncing is now backed by a robust software debounce state machine. Time tracking has been upgraded to nanosecond precision (`time.monotonic_ns()`), and file saving now uses strict `os.fsync` to guarantee profile writes.
 * **🎨 Deep Customization:** Configure actions for **8 different gestures** per profile:
     * Rotate Clockwise (CW)
     * Rotate Counter-Clockwise (CCW)
     * Short Click
-    * **NEW: Double Click**
-    * **NEW: Triple Click**
+    *  Double Click
+    *  Triple Click
     * Long Press
     * Hold + CW (Shifted)
     * Hold + CCW (Shifted)
@@ -29,7 +33,7 @@ This project has evolved from a simple media controller into a powerful control 
 * **🎚️ Per-Action Sensitivity:** Set different "steps per click" (1x-10x) independently for **Volume**, **Scroll**, and **Mouse** movements.
 * **🖥️ Modern UI (KnobStudio):** A sleek, dark-mode app (`customtkinter`) to easily set up all your profiles, sensitivities, and macros.
 * **💾 Simple "Save & Reboot":** The app saves your settings directly to a `profiles.json` file on the Pico's `CIRCUITPY` drive and then sends a serial command to reboot the Pico, loading the new settings instantly.
-* **🔄 Persistent On-Device Profile Saving:** **(NEW)** When you switch profiles *using the knob* (e.g., with a 'Next Profile' action), your choice is automatically saved to the Pico's flash. The knob will now boot into the last-used profile.
+* **🔄 Persistent On-Device Profile Saving:** When you switch profiles *using the knob* (e.g., with a 'Next Profile' action), your choice is automatically saved to the Pico's flash. The knob will now boot into the last-used profile.
 
 ---
 
@@ -39,7 +43,7 @@ This project is now in a mature stage. The architecture was designed to be modul
 
 * **🖥️ App-Specific Profiles:** A new PC-side agent that detects the active application (e.g., Photoshop, VS Code, Spotify) and automatically signals the Pico to switch to a corresponding profile.
 * **📱 Wireless Bluetooth Version:** Developing a hardware revision (likely with a Pico W) to create a fully wireless, battery-powered version of the knob using Bluetooth LE (HID).
-* **🐧 Linux & macOS Support:** Porting the `KnobStudio` configurator app to be cross-platform, resolving current Windows-specific dependencies (like `pywin32`) for drive and port detection.
+* **🍏 macOS Support:** Porting the `KnobStudio` configurator app to support macOS drive routing natively.
 * **🌈 RGB LED Profile Indicator:** The next planned hardware addition is an RGB LED (like a NeoPixel). This will provide instant visual feedback on the active profile by changing color (e.g., Profile 1 = Red, Profile 2 = Green).
 * **📺 OLED Display Integration:** An I2C OLED screen (like an SSD1306) can be added to display dynamic information, such as custom profile names ("Volume", "Editing", "Gaming").
 * **👋 Per-Action Haptic Feedback (Advanced):** Integrating a small vibration motor to provide tactile feedback on action execution or profile switching.
@@ -48,26 +52,25 @@ This project is now in a mature stage. The architecture was designed to be modul
 
 ## 🛠️ How It Works
 
-This project uses a "Configurator" model, which combines the speed of HID with the flexibility of a GUI.
+This project uses a "Configurator" model, which combines the speed of an autonomous HID with the visual flexibility of a GUI.
 
 ### The Pico (The "Muscle"): Runs `code.py`
 
-1.  On boot, it reads a `profiles.json` file from its own storage to load its configuration.
-2.  It initializes itself as a USB Keyboard, Media Controller, & **Mouse (HID)**.
-3.  When you turn or press the knob, a new **advanced state machine** differentiates between a **single click, double click, triple click**, a long press, and a "shifted" (hold+rotate) action.
-4.  It sends the corresponding **direct HID command** (e.g., `Volume Up`, `Mouse Scroll`, or a complex, **multi-step macro sequence**) to the PC.
-5.  When a profile is changed *on the knob*, it re-mounts its filesystem, **saves the new default profile to `profiles.json`**, and continues.
-6.  It also listens on its Data Serial Port for one specific command: `"REBOOT"`.
+1.  On boot, it reads a `profiles.json` file from its own storage, validating it strictly against type errors.
+2.  It initializes itself as a USB Keyboard, Media Controller, & Mouse.
+3.  When you turn or press the knob, a **software-debounced state machine** differentiates between a single click, double click, triple click, long press, and a "shifted" (hold+rotate) action.
+4.  It sends the corresponding **direct HID command** or executes a **multi-step macro sequence** to the PC.
+5.  It passively listens on its Data Serial Port for soft-reboot interrupts from the PC.
 
 ### The PC App (KnobStudio): Runs `KnobStudio.py`
 
-1.  This app **does not** need to run in the background.
+1.  This app **does not** need to run in the background. Open it only to change settings.
 2.  When you click "Save & Reboot Pico":
-    * It finds the Pico's `CIRCUITPY` USB drive (using `psutil`).
-    * It writes your new settings (profiles, sensitivity, and all simple/advanced macros) to the `profiles.json` file (using the latest multi-action structure).
-    * It finds the Pico's Data Serial Port (using `pyserial`).
-    * It sends the text command `"REBOOT"` over the serial port.
-3.  The Pico receives the command, reboots, reads the *new* `profiles.json`, and is ready with the new settings.
+    * It safely finds the Pico's `CIRCUITPY` USB drive (using `psutil` and fallback probes).
+    * It writes your new settings to `profiles.json` and flushes the buffer to prevent corruption.
+    * It finds the Pico's Serial Port (using `pyserial`).
+    * It sends a soft-reboot serial interrupt (`\x03` + `\x04`).
+3.  The Pico receives the command, soft-reboots, reads the *new* `profiles.json`, and is ready instantly.
 
 ---
 
@@ -93,14 +96,21 @@ This project uses a "Configurator" model, which combines the speed of HID with t
 
 ### Pico (Hardware)
 
-1.  **Raspberry Pi Pico:** A Pico or Pico W.
-2.  **CircuitPython:** The code is written for CircuitPython. Ensure you have the latest version of [CircuitPython for your Pico](https://circuitpython.org/board/raspberry_pi_pico/) installed.
-3.  **CircuitPython Libraries:** After installing CircuitPython, copy the following library from the [CircuitPython Library Bundle](https://circuitpython.org/libraries) to the `lib` folder on your `CIRCUITPY` drive:
+1.  **CircuitPython:** Ensure you have the latest version of [CircuitPython for your Pico](https://circuitpython.org/board/raspberry_pi_pico/) installed.
+2.  **CircuitPython Libraries:** Copy the following library from the [CircuitPython Library Bundle](https://circuitpython.org/libraries) to the `lib` folder on your `CIRCUITPY` drive:
     * `adafruit_hid`
 
 ### PC (KnobStudio App)
 
-The Configurator app (`KnobStudio.py`) is written in Python 3 and requires the following libraries. You can install them all by running:
+The Configurator app is written in Python 3. 
 
+**For Windows (`KnobStudio.py`):**
 ```bash
 pip install customtkinter psutil pyserial pywin32
+```
+
+**For Linux (`KnobStudio_Linux.py`):**
+```bash
+pip install customtkinter psutil pyserial
+```
+*Note for Linux users: Your user must be part of the `dialout` group to send the serial reboot command to the Pico. KnobStudio will warn you if you aren't. To fix it, run `sudo usermod -aG dialout $USER` and log out/in.*
