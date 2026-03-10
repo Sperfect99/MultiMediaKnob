@@ -1,18 +1,7 @@
-# File: KnobStudio
-# Version: 7.0 
+# File: KnobStudio.py 
+# Version: 7.1 Refactored (Windows Edition)
 # Author: Stylianos Tanellari
-"""
-KnobStudio — Advanced Macro Edition
---------------------------------------------
-Version 7.0 
-- Adds a new Advanced Macro (Sequence) engine.
-- ActionEditor now has 3 tabs:
-  1. Simple Action
-  2. Simple Macro (the old "Advanced Macro" for shortcuts)
-  3. Adv. Macro (Sequence) (a new script-based multi-step engine)
-- UI in ActionEditor is taller (450px) to fit the new text box.
-- Save/Load logic updated to parse/generate macro scripts.
-"""
+#
 
 import os
 import sys
@@ -24,16 +13,19 @@ import serial.tools.list_ports
 import psutil
 import tkinter as tk
 from tkinter import messagebox
-from collections import OrderedDict
 
 try:
     import customtkinter as ctk
 except Exception as e:
-    messagebox.showerror("Missing dependency",
-                         f"CustomTkinter is missing!\nPlease install it:\n\npip install customtkinter\n\n{e}")
+    messagebox.showerror(
+        "Missing dependency",
+        f"CustomTkinter is not installed.\n\npip install customtkinter\n\n{e}"
+    )
     sys.exit(1)
 
-# --- Available "Simple" Actions  ---
+
+# Constants
+
 AVAILABLE_SIMPLE_ACTIONS = [
     "nothing",
     "volume_up", "volume_down", "mute", "play_pause", "next_track", "prev_track",
@@ -41,183 +33,190 @@ AVAILABLE_SIMPLE_ACTIONS = [
     "mouse_move_x_pos", "mouse_move_x_neg", "mouse_move_y_pos", "mouse_move_y_neg",
     "mouse_scroll_v_pos", "mouse_scroll_v_neg", "mouse_scroll_h_pos", "mouse_scroll_h_neg",
     "mouse_click_left", "mouse_click_right", "mouse_click_middle",
-    "next_profile", "switch_profile_1", "switch_profile_2", "switch_profile_3"
+    "next_profile", "switch_profile_1", "switch_profile_2", "switch_profile_3",
 ]
 
-
 MODIFIER_DISPLAY_MAP = {
-    "LEFT_CONTROL": "Ctrl", "LEFT_SHIFT": "Shift", "LEFT_ALT": "Alt", "LEFT_GUI": "Win/Cmd",
-    "RIGHT_CONTROL": "RCtrl", "RIGHT_SHIFT": "RShift", "RIGHT_ALT": "RAlt", "RIGHT_GUI": "RWin"
+    "LEFT_CONTROL":  "Ctrl",    "LEFT_SHIFT":  "Shift",
+    "LEFT_ALT":      "Alt",     "LEFT_GUI":    "Win/Cmd",
+    "RIGHT_CONTROL": "RCtrl",   "RIGHT_SHIFT": "RShift",
+    "RIGHT_ALT":     "RAlt",    "RIGHT_GUI":   "RWin",
 }
-DEFAULT_ACTION_OBJECT = {"type": "simple", "action": "nothing"}
 
+_ALL_GESTURE_KEYS = (
+    "cw", "ccw", "click", "double_click", "triple_click",
+    "long_press", "cw_shifted", "ccw_shifted",
+)
+
+
+# Helpers
 
 def normalize_key_name(key_str):
     key = key_str.strip().upper()
-    if key in ["CONTROL", "CTRL"]: return "LEFT_CONTROL"
-    if key in ["SHIFT"]: return "LEFT_SHIFT"
-    if key in ["ALT", "ALT_GR"]: return "LEFT_ALT"
-    if key in ["WIN", "CMD", "WINDOWS", "COMMAND"]: return "LEFT_GUI"
-    if key in ["DEL"]: return "DELETE"
-    if key in ["ESC"]: return "ESCAPE"
-    if key in ["UP"]: return "UP_ARROW"
-    if key in ["DOWN"]: return "DOWN_ARROW"
-    if key in ["LEFT"]: return "LEFT_ARROW"
-    if key in ["RIGHT"]: return "RIGHT_ARROW"
-    return key
+    aliases = {
+        "CONTROL": "LEFT_CONTROL", "CTRL":    "LEFT_CONTROL",
+        "SHIFT":   "LEFT_SHIFT",
+        "ALT":     "LEFT_ALT",     "ALT_GR":  "LEFT_ALT",
+        "WIN":     "LEFT_GUI",     "CMD":     "LEFT_GUI",
+        "WINDOWS": "LEFT_GUI",     "COMMAND": "LEFT_GUI",
+        "WIN/CMD": "LEFT_GUI",     "WIN/COMMAND": "LEFT_GUI",
+        "DEL":     "DELETE",       "ESC":     "ESCAPE",
+        "UP":      "UP_ARROW",     "DOWN":    "DOWN_ARROW",
+        "LEFT":    "LEFT_ARROW",   "RIGHT":   "RIGHT_ARROW",
+    }
+    return aliases.get(key, key)
 
-# --- Helper Functions (Pico Finder) ---
+
 def find_circuitpy_drive():
     for part in psutil.disk_partitions(all=True):
-        if 'rw' in part.opts and part.mountpoint and part.fstype:
-            try:
-                if (os.path.exists(os.path.join(part.mountpoint,'code.py')) or
-                    os.path.exists(os.path.join(part.mountpoint,'boot_out.txt'))):
-                    label=""
-                    if sys.platform=="win32":
-                        try:
-                            import win32api
-                            label=win32api.GetVolumeInformation(part.mountpoint+"\\")[0]
-                        except Exception: pass
-                    if "CIRCUITPY" in (label or "") or label=="":
-                        return part.mountpoint
-            except Exception: continue
+        if not part.mountpoint or not part.fstype:
+            continue
+        if "ro" in part.opts.split(","):
+            continue
+        mp = part.mountpoint
+        try:
+            label = ""
+            if sys.platform == "win32":
+                try:
+                    import win32api
+                    label = win32api.GetVolumeInformation(mp.rstrip("\\") + "\\")[0]
+                except Exception:
+                    pass
+            if "CIRCUITPY" in label.upper():
+                return mp
+            if (os.path.exists(os.path.join(mp, "boot_out.txt")) and
+                    os.path.exists(os.path.join(mp, "code.py"))):
+                return mp
+        except (PermissionError, OSError):
+            continue
     return None
 
+
 def find_pico_serial_port_for_reboot():
-    VID=0x2E8A; PID=0x000A
+    VID = 0x2E8A  # Raspberry Pico
+    PID = 0x000A  # CircuitPython CDC data port
+
     for port in serial.tools.list_ports.comports():
-        if port.vid==VID and getattr(port,"pid",None)==PID:
+        if port.vid == VID and getattr(port, "pid", None) == PID:
             return port.device
+
     for port in serial.tools.list_ports.comports():
-        if ("Pico" in (port.description or "") or "CircuitPython" in (port.description or "")) and port.vid==VID:
-            return port.device
+        if port.vid == VID:
+            desc = port.description or ""
+            if any(k in desc for k in ("Pico", "CircuitPython", "CDC")):
+                return port.device
+
     return None
+
 
 def send_reboot_command(port_name):
     try:
-        with serial.Serial(port_name,timeout=0.5,write_timeout=0.5) as s:
-            s.write(b"REBOOT\n")
+        with serial.Serial(port_name, timeout=2, write_timeout=2) as s:
+            s.write(b"\x03")        # Ctrl+C  interrupt running code.py
+            time.sleep(0.15)        # wait for REPL to reach >>> prompt
+            s.write(b"\x04")        # Ctrl+D  soft reboot
         return True
     except Exception as e:
-        print("Reboot error:",e); return False
+        print(f"[REBOOT] {e}")
+        return False
 
-# ====================================================================== #
-#                  ACTION EDITOR (Adv. Macro)                   #
-# ====================================================================== #
+# Action Editor
 
 class ActionEditor(ctk.CTkToplevel):
+
     def __init__(self, parent, current_action_obj, profile_num, action_key):
         super().__init__(parent)
-        self.parent = parent
         self.result = None
-        
-        self.title(f"Edit Action (P{profile_num} - {action_key.upper()})")
-        self.geometry("450x450") # Taller for new tab
+
+        self.title(f"Edit Action  —  Profile {profile_num}  /  {action_key.upper()}")
+        self.geometry("450x450")
         self.transient(parent)
+        self.wait_visibility()   # ensure window is mapped before grabbing 
         self.grab_set()
         self.resizable(False, False)
         self.protocol("WM_DELETE_WINDOW", self._on_cancel)
-        
-        self.tabs = ctk.CTkTabview(self, width=400, height=390) # Taller
+
+        self.tabs = ctk.CTkTabview(self, width=400, height=390)
         self.tabs.pack(pady=10, padx=10, fill="both", expand=True)
         self.tabs.add("Simple Action")
         self.tabs.add("Simple Macro")
-        self.tabs.add("Adv. Macro (Sequence)") # New Tab
-        
-        # --- Tab 1: Simple Action ---
-        simple_frame = self.tabs.tab("Simple Action")
-        self.simple_tab_var = tk.StringVar()
-        ctk.CTkLabel(simple_frame, text="Select a simple HID action:").pack(anchor="w", padx=20, pady=(10,5))
-        self.simple_menu = ctk.CTkOptionMenu(simple_frame, values=AVAILABLE_SIMPLE_ACTIONS, variable=self.simple_tab_var, width=300)
-        self.simple_menu.pack(anchor="w", padx=20, pady=5)
-        
-        # --- Tab 2: Simple Macro (Shortcut) ---
-        macro_frame = self.tabs.tab("Simple Macro")
-        self.macro_entry_var = tk.StringVar()
-        ctk.CTkLabel(macro_frame, text="Enter key combination (e.g., CTRL+SHIFT+T):").pack(anchor="w", padx=20, pady=(10,5))
-        self.macro_entry = ctk.CTkEntry(macro_frame, textvariable=self.macro_entry_var, width=300, font=("Consolas", 13))
-        self.macro_entry.pack(anchor="w", padx=20, pady=5)
-        ctk.CTkLabel(macro_frame, text="Use this for simple, simultaneous key presses.").pack(anchor="w", padx=20, pady=5)
-        ctk.CTkLabel(macro_frame, text="Separate simultaneous keys with '+'.", text_color="gray", font=("Arial", 10)).pack(anchor="w", padx=20)
-        
-        # --- Tab 3: Advanced Macro (Sequence) ---
-        adv_macro_frame = self.tabs.tab("Adv. Macro (Sequence)")
-        ctk.CTkLabel(adv_macro_frame, text="Enter macro sequence (one command per line):").pack(anchor="w", padx=20, pady=(10,5))
-        self.adv_macro_textbox = ctk.CTkTextbox(adv_macro_frame, width=360, height=200, font=("Consolas", 12))
-        self.adv_macro_textbox.pack(anchor="w", padx=20, pady=5, fill="both", expand=True)
-        ctk.CTkLabel(adv_macro_frame, text="Commands: press, release, tap, wait (ms), release_all", text_color="gray", font=("Arial", 10)).pack(anchor="w", padx=20, pady=(0,5))
+        self.tabs.add("Adv. Macro (Sequence)")
 
-        
-        btn_frame = ctk.CTkFrame(self, fg_color="transparent")
-        btn_frame.pack(fill="x", padx=10, pady=(0, 10))
-        
-        self.save_btn = ctk.CTkButton(btn_frame, text="Save Action", command=self._on_save)
-        self.save_btn.pack(side="right", padx=10)
-        
-        self.cancel_btn = ctk.CTkButton(btn_frame, text="Cancel", command=self._on_cancel, fg_color="gray")
-        self.cancel_btn.pack(side="right", padx=5)
+        # Tab 1: Simple Action
+        sf = self.tabs.tab("Simple Action")
+        self.simple_tab_var = tk.StringVar()
+        ctk.CTkLabel(sf, text="Select a simple HID action:").pack(anchor="w", padx=20, pady=(10, 5))
+        ctk.CTkOptionMenu(sf, values=AVAILABLE_SIMPLE_ACTIONS,
+                          variable=self.simple_tab_var, width=300).pack(anchor="w", padx=20, pady=5)
+
+        # Tab 2: Simple Macro
+        mf = self.tabs.tab("Simple Macro")
+        self.macro_entry_var = tk.StringVar()
+        ctk.CTkLabel(mf, text="Enter key combination (e.g., CTRL+SHIFT+T):").pack(anchor="w", padx=20, pady=(10, 5))
+        ctk.CTkEntry(mf, textvariable=self.macro_entry_var, width=300,
+                     font=("Consolas", 13)).pack(anchor="w", padx=20, pady=5)
+        ctk.CTkLabel(mf, text="Use this for simple, simultaneous key presses.").pack(anchor="w", padx=20, pady=5)
+        ctk.CTkLabel(mf, text="Separate simultaneous keys with '+'.",
+                     text_color="gray", font=("Arial", 10)).pack(anchor="w", padx=20)
+
+        # Tab 3: Advanced Macro
+        af = self.tabs.tab("Adv. Macro (Sequence)")
+        ctk.CTkLabel(af, text="Enter macro sequence (one command per line):").pack(anchor="w", padx=20, pady=(10, 5))
+        self.adv_macro_textbox = ctk.CTkTextbox(af, width=360, height=200, font=("Consolas", 12))
+        self.adv_macro_textbox.pack(anchor="w", padx=20, pady=5, fill="both", expand=True)
+        ctk.CTkLabel(af, text="Commands: press, release, tap, wait (ms), release_all",
+                     text_color="gray", font=("Arial", 10)).pack(anchor="w", padx=20, pady=(0, 5))
+
+        bf = ctk.CTkFrame(self, fg_color="transparent")
+        bf.pack(fill="x", padx=10, pady=(0, 10))
+        ctk.CTkButton(bf, text="Save Action", command=self._on_save).pack(side="right", padx=10)
+        ctk.CTkButton(bf, text="Cancel", command=self._on_cancel,
+                      fg_color="gray").pack(side="right", padx=5)
 
         self._load_current_action(current_action_obj)
 
     def _load_current_action(self, action_obj):
         try:
-            action_type = action_obj.get("type", "simple")
-            
-            if action_type == "macro_advanced":
+            t = action_obj.get("type", "simple")
+            if t == "macro_advanced":
                 self.tabs.set("Adv. Macro (Sequence)")
-                script = self._generate_script_from_steps(action_obj.get("steps", []))
-                self.adv_macro_textbox.insert("1.0", script)
-                
-            elif action_type == "macro":
+                self.adv_macro_textbox.insert("1.0",
+                    self._steps_to_script(action_obj.get("steps", [])))
+            elif t == "macro":
                 self.tabs.set("Simple Macro")
-                display_keys = []
-                for key in action_obj.get("keys", []):
-                    display_keys.append(MODIFIER_DISPLAY_MAP.get(key, key.upper()))
-                self.macro_entry_var.set(" + ".join(display_keys))
-                
-            else: # "simple"
+                keys = [MODIFIER_DISPLAY_MAP.get(k, k.upper()) for k in action_obj.get("keys", [])]
+                self.macro_entry_var.set(" + ".join(keys))
+            else:
                 self.tabs.set("Simple Action")
                 self.simple_tab_var.set(action_obj.get("action", "nothing"))
-                
         except Exception as e:
-            print(f"Error loading action: {e}")
+            print(f"[ActionEditor] Load error: {e}")
 
     def _on_save(self):
-        active_tab = self.tabs.get()
-        
-        if active_tab == "Simple Action":
-            self.result = {
-                "type": "simple",
-                "action": self.simple_tab_var.get()
-            }
-        
-        elif active_tab == "Simple Macro":
-            macro_string = self.macro_entry_var.get()
-            if not macro_string:
+        tab = self.tabs.get()
+
+        if tab == "Simple Action":
+            self.result = {"type": "simple", "action": self.simple_tab_var.get()}
+
+        elif tab == "Simple Macro":
+            raw = self.macro_entry_var.get().strip()
+            if not raw:
                 messagebox.showerror("Error", "Macro string is empty.", parent=self)
                 return
-            raw_keys = macro_string.split('+')
-            final_keys = [normalize_key_name(key) for key in raw_keys if key.strip()]
-            if not final_keys:
+            keys = [normalize_key_name(k) for k in raw.split("+") if k.strip()]
+            if not keys:
                 messagebox.showerror("Error", "Macro string is invalid.", parent=self)
                 return
-            self.result = {
-                "type": "macro", # Old simple macro
-                "keys": final_keys
-            }
-            
-        elif active_tab == "Adv. Macro (Sequence)":
-            script_text = self.adv_macro_textbox.get("1.0", "end-1c")
-            steps, error = self._parse_script_to_steps(script_text)
+            self.result = {"type": "macro", "keys": keys}
+
+        elif tab == "Adv. Macro (Sequence)":
+            text = self.adv_macro_textbox.get("1.0", "end-1c")
+            steps, error = self._script_to_steps(text)
             if error:
                 messagebox.showerror("Macro Error", error, parent=self)
                 return
-            self.result = {
-                "type": "macro_advanced", # New advanced macro
-                "steps": steps
-            }
-            
+            self.result = {"type": "macro_advanced", "steps": steps}
+
         self.grab_release()
         self.destroy()
 
@@ -226,95 +225,79 @@ class ActionEditor(ctk.CTkToplevel):
         self.grab_release()
         self.destroy()
 
-    # --- v7.0 Macro Scripting Helpers ---
-    def _parse_script_to_steps(self, script_text):
+    def _script_to_steps(self, script_text):
         steps = []
-        lines = script_text.splitlines()
-        for i, line in enumerate(lines):
-            line_num = i + 1
-            line = line.strip()
-            if not line or line.startswith('#'):
+        for i, raw_line in enumerate(script_text.splitlines()):
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
                 continue
-            
             parts = line.lower().split(maxsplit=1)
-            command = parts[0]
-            args_str = parts[1] if len(parts) > 1 else ""
-            
+            cmd  = parts[0]
+            args = parts[1] if len(parts) > 1 else ""
+            ln   = i + 1
             try:
-                if command == "wait":
-                    delay_ms = int(args_str)
-                    steps.append({"wait": delay_ms / 1000.0}) # Convert ms to seconds
-                
-                elif command in ["press", "tap", "release"]:
-                    if not args_str:
-                        return None, f"Error on line {line_num}: '{command}' needs at least one key."
-                    raw_keys = args_str.split('+')
-                    final_keys = [normalize_key_name(key) for key in raw_keys if key.strip()]
-                    if not final_keys:
-                        return None, f"Error on line {line_num}: Invalid keys for '{command}'."
-                    steps.append({command: final_keys})
-                    
-                elif command == "release_all":
+                if cmd == "wait":
+                    raw_ms = int(args)
+                    if not (0 <= raw_ms <= 10_000):
+                        return None, (
+                            f"Line {ln}: 'wait' value must be 0–10000 ms "
+                            f"(got {raw_ms}). Max is 10 seconds per step."
+                        )
+                    steps.append({"wait": raw_ms / 1000.0})
+                elif cmd in ("press", "tap", "release"):
+                    if not args:
+                        return None, f"Line {ln}: '{cmd}' requires at least one key."
+                    keys = [normalize_key_name(k) for k in args.split("+") if k.strip()]
+                    if not keys:
+                        return None, f"Line {ln}: invalid keys for '{cmd}'."
+                    steps.append({cmd: keys})
+                elif cmd == "release_all":
                     steps.append({"release_all": True})
-                    
                 else:
-                    return None, f"Error on line {line_num}: Unknown command '{command}'."
-            
+                    return None, f"Line {ln}: unknown command '{cmd}'."
             except Exception as e:
-                return None, f"Error parsing line {line_num} ('{line}'): {e}"
-                
+                return None, f"Line {ln} ('{line}'): {e}"
         return steps, None
 
-    def _generate_script_from_steps(self, steps):
-        script_lines = []
+    def _steps_to_script(self, steps):
+        lines = []
         for step in steps:
             try:
                 if "wait" in step:
-                    delay_ms = int(step["wait"] * 1000) # Convert seconds to ms
-                    script_lines.append(f"wait {delay_ms}")
-                    
+                    lines.append(f"wait {round(step['wait'] * 1000)}")
                 elif "press" in step:
-                    keys = [MODIFIER_DISPLAY_MAP.get(k, k.upper()) for k in step["press"]]
-                    script_lines.append(f"press {" + ".join(keys)}")
-                    
+                    lines.append("press " + " + ".join(
+                        MODIFIER_DISPLAY_MAP.get(k, k.upper()) for k in step["press"]))
                 elif "tap" in step:
-                    keys = [MODIFIER_DISPLAY_MAP.get(k, k.upper()) for k in step["tap"]]
-                    script_lines.append(f"tap {" + ".join(keys)}")
-                    
+                    lines.append("tap " + " + ".join(
+                        MODIFIER_DISPLAY_MAP.get(k, k.upper()) for k in step["tap"]))
                 elif "release" in step:
-                    keys = [MODIFIER_DISPLAY_MAP.get(k, k.upper()) for k in step["release"]]
-                    script_lines.append(f"release {" + ".join(keys)}")
-                    
-                elif "release_all" in step and step["release_all"]:
-                    script_lines.append("release_all")
-                    
+                    lines.append("release " + " + ".join(
+                        MODIFIER_DISPLAY_MAP.get(k, k.upper()) for k in step["release"]))
+                elif step.get("release_all"):
+                    lines.append("release_all")
             except Exception as e:
-                script_lines.append(f"# ERROR generating line for step: {step} ({e})")
-                
-        return "\n".join(script_lines)
+                lines.append(f"# ERROR generating step: {step} ({e})")
+        return "\n".join(lines)
 
-# ====================================================================== #
-#               MAIN UI CLASS (Adv. Macro)                #
-# ====================================================================== #
+# Main Configurator
+
 class MultiKnobConfiguratorModern:
-    
+
     def __init__(self, root):
         self.root = root
-        self.root.title("KnobStudio — v7.0 (Advanced Macro)") # v7.0
+        self.root.title("KnobStudio — v7.0 (Advanced Macro)")
         ctk.set_appearance_mode("Dark")
         try:
             ctk.set_default_color_theme("green")
         except Exception:
             pass
-        # --- Window is taller to fit new rows ---
-        self.root.geometry("1000x720") # Was 640
-        self.root.minsize(980, 720)   # Was 640
-        
-        self.profile_vars = {}
-        self.action_labels = {}
-        
+        self.root.geometry("1000x720")
+        self.root.minsize(980, 720)
+
+        self.profile_vars   = {}
+        self.action_labels  = {}
         self.current_settings = self.load_gui_settings()
-        self.action_names_simple = AVAILABLE_SIMPLE_ACTIONS
 
         self.main_frame = ctk.CTkFrame(root, corner_radius=8, fg_color="#0b1220")
         self.main_frame.pack(fill="both", expand=True, padx=12, pady=12)
@@ -322,271 +305,295 @@ class MultiKnobConfiguratorModern:
         self.left.pack(side="left", fill="both", expand=True, padx=(8, 4), pady=8)
         self.right = ctk.CTkFrame(self.main_frame, width=260)
         self.right.pack(side="right", fill="y", padx=(4, 8), pady=8)
-        
+
         self.build_left()
         self.build_right()
         self.bottom_bar()
         self.root.protocol("WM_DELETE_WINDOW", self.root.destroy)
 
-    # ---------------- LEFT ----------------
+    
     def build_left(self):
-        ctk.CTkLabel(self.left, text="KnobStudio", font=ctk.CTkFont(size=18, weight="bold")).pack(anchor="w", padx=14, pady=(10, 6))
-        
-        # --- General Settings Frame  ---
+        ctk.CTkLabel(self.left, text="KnobStudio",
+                     font=ctk.CTkFont(size=18, weight="bold")).pack(anchor="w", padx=14, pady=(10, 6))
+
         gf = ctk.CTkFrame(self.left)
         gf.pack(fill="x", padx=12, pady=(0, 10))
         gf.grid_columnconfigure(1, weight=1)
         gf.grid_columnconfigure(4, weight=1)
 
-        # Row 0: Volume and Kbd Scroll
-        self.sens_vol = tk.IntVar(value=self.current_settings.get("sensitivity_volume", 2))
-        ctk.CTkLabel(gf, text="Volume Sens:").grid(row=0, column=0, padx=(8, 4), pady=8, sticky="w")
-        self.sens_vol_label = ctk.CTkLabel(gf, width=28)
-        self.sens_vol_label.grid(row=0, column=2, padx=(0, 12))
-        slider_vol = ctk.CTkSlider(gf, from_=2, to=10, number_of_steps=8, variable=self.sens_vol,
-                                   command=lambda v: self.sens_vol_label.configure(text=f"{int(v)}x"))
-        slider_vol.grid(row=0, column=1, padx=(0, 8), pady=8, sticky="ew")
-        self.sens_vol_label.configure(text=f"{self.sens_vol.get()}x")
-
-        self.sens_scr = tk.IntVar(value=self.current_settings.get("sensitivity_scroll", 1))
-        ctk.CTkLabel(gf, text="Kbd Scroll:").grid(row=0, column=3, padx=(8, 4), pady=8, sticky="w")
-        self.sens_scr_label = ctk.CTkLabel(gf, width=28)
-        self.sens_scr_label.grid(row=0, column=5, padx=(0, 12))
-        slider_scr = ctk.CTkSlider(gf, from_=1, to=10, number_of_steps=9, variable=self.sens_scr,
-                                   command=lambda v: self.sens_scr_label.configure(text=f"{int(v)}x"))
-        slider_scr.grid(row=0, column=4, padx=(0, 8), pady=8, sticky="ew")
-        self.sens_scr_label.configure(text=f"{self.sens_scr.get()}x")
-        
-        # Row 1: Mouse Sens
+        self.sens_vol   = tk.IntVar(value=self.current_settings.get("sensitivity_volume", 2))
+        self.sens_scr   = tk.IntVar(value=self.current_settings.get("sensitivity_scroll", 1))
         self.sens_mouse = tk.IntVar(value=self.current_settings.get("sensitivity_mouse", 4))
+
+        # Row 0: Volume and Keyboard Scroll
+        ctk.CTkLabel(gf, text="Volume Sens:").grid(row=0, column=0, padx=(8, 4), pady=8, sticky="w")
+        vol_lbl = ctk.CTkLabel(gf, width=28)
+        vol_lbl.grid(row=0, column=2, padx=(0, 12))
+        ctk.CTkSlider(gf, from_=2, to=10, number_of_steps=8, variable=self.sens_vol,
+                      command=lambda v: vol_lbl.configure(text=f"{int(v)}x")
+                      ).grid(row=0, column=1, padx=(0, 8), pady=8, sticky="ew")
+        vol_lbl.configure(text=f"{self.sens_vol.get()}x")
+
+        ctk.CTkLabel(gf, text="Kbd Scroll:").grid(row=0, column=3, padx=(8, 4), pady=8, sticky="w")
+        scr_lbl = ctk.CTkLabel(gf, width=28)
+        scr_lbl.grid(row=0, column=5, padx=(0, 12))
+        ctk.CTkSlider(gf, from_=1, to=10, number_of_steps=9, variable=self.sens_scr,
+                      command=lambda v: scr_lbl.configure(text=f"{int(v)}x")
+                      ).grid(row=0, column=4, padx=(0, 8), pady=8, sticky="ew")
+        scr_lbl.configure(text=f"{self.sens_scr.get()}x")
+
+        # Row 1: Mouse
         ctk.CTkLabel(gf, text="Mouse Sens:").grid(row=1, column=0, padx=(8, 4), pady=8, sticky="w")
-        self.sens_mouse_label = ctk.CTkLabel(gf, width=28)
-        self.sens_mouse_label.grid(row=1, column=5, padx=(0, 12))
-        slider_mouse = ctk.CTkSlider(gf, from_=1, to=10, number_of_steps=9, variable=self.sens_mouse,
-                                     command=lambda v: self.sens_mouse_label.configure(text=f"{int(v)}x"))
-        slider_mouse.grid(row=1, column=1, columnspan=4, padx=(0, 8), pady=8, sticky="ew")
-        self.sens_mouse_label.configure(text=f"{self.sens_mouse.get()}x")
-        
-        
-        # --- Tabs ---
+        mouse_lbl = ctk.CTkLabel(gf, width=28)
+        mouse_lbl.grid(row=1, column=5, padx=(0, 12))
+        ctk.CTkSlider(gf, from_=1, to=10, number_of_steps=9, variable=self.sens_mouse,
+                      command=lambda v: mouse_lbl.configure(text=f"{int(v)}x")
+                      ).grid(row=1, column=1, columnspan=4, padx=(0, 8), pady=8, sticky="ew")
+        mouse_lbl.configure(text=f"{self.sens_mouse.get()}x")
+
         self.tabs = ctk.CTkTabview(self.left)
         self.tabs.pack(fill="both", expand=True, padx=12, pady=8)
-        
+
         for i in (1, 2, 3):
             self.tabs.add(f"Profile {i}")
             tab = self.tabs.tab(f"Profile {i}")
             tab.grid_columnconfigure(1, weight=1)
             tab.grid_columnconfigure(2, weight=0)
-            
-            profile_key = f"profile{i}"
-            # Load new default keys
-            self.profile_vars[i] = self.current_settings.get(profile_key, {
-                'cw': DEFAULT_ACTION_OBJECT, 'ccw': DEFAULT_ACTION_OBJECT,
-                'click': DEFAULT_ACTION_OBJECT,
-                'double_click': DEFAULT_ACTION_OBJECT, # New
-                'triple_click': DEFAULT_ACTION_OBJECT, # New
-                'long_press': DEFAULT_ACTION_OBJECT,
-                'cw_shifted': DEFAULT_ACTION_OBJECT, 'ccw_shifted': DEFAULT_ACTION_OBJECT # New
+
+            self.profile_vars[i] = self.current_settings.get(f"profile{i}", {
+                k: {"type": "simple", "action": "nothing"} for k in _ALL_GESTURE_KEYS
             })
-            
             self.action_labels[i] = {}
-            
-            # Add new rows
-            self._profile_row(tab, i, "Clockwise (CW):", "cw", 0)
-            self._profile_row(tab, i, "Counter-CW (CCW):", "ccw", 1)
-            self._profile_row(tab, i, "Click:", "click", 2)
-            # --- New Rows ---
-            self._profile_row(tab, i, "Double Click:", "double_click", 3)
-            self._profile_row(tab, i, "Triple Click:", "triple_click", 4)
-            # ---
-            self._profile_row(tab, i, "Long Press:", "long_press", 5)
-            # --- Shift Rows ---
-            self._profile_row(tab, i, "Hold + CW:", "cw_shifted", 6, is_new=True)
-            self._profile_row(tab, i, "Hold + CCW:", "ccw_shifted", 7, is_new=True)
-        
+
+            rows = [
+                ("Clockwise (CW):",   "cw",           False),
+                ("Counter-CW (CCW):", "ccw",          False),
+                ("Click:",            "click",        False),
+                ("Double Click:",     "double_click", False),
+                ("Triple Click:",     "triple_click", False),
+                ("Long Press:",       "long_press",   False),
+                ("Hold + CW:",        "cw_shifted",   True),
+                ("Hold + CCW:",       "ccw_shifted",  True),
+            ]
+            for row, (label, key, is_new) in enumerate(rows):
+                self._profile_row(tab, i, label, key, row, is_new=is_new)
+
         self.tabs.set("Profile 1")
 
     def _profile_row(self, tab, profile_index, label_text, action_key, row, is_new=False):
-        # Add a subtle top padding for the "Hold" rows
-        pady_val = (12 if is_new else (10 if row == 0 else 8), 8)
-        
-        ctk.CTkLabel(tab, text=label_text).grid(row=row, column=0, sticky="w", padx=10, pady=pady_val)
-        
-        # Ensure the key exists in the loaded data, even if loading old config
-        if action_key not in self.profile_vars[profile_index]:
-             self.profile_vars[profile_index][action_key] = DEFAULT_ACTION_OBJECT
-             
-        action_obj = self.profile_vars[profile_index][action_key]
-        display_text = self._get_action_display_text(action_obj)
-        action_label = ctk.CTkLabel(tab, text=display_text, anchor="e", font=ctk.CTkFont(family="Consolas", size=13))
-        action_label.grid(row=row, column=1, padx=10, pady=pady_val, sticky="ew")
-        self.action_labels[profile_index][action_key] = action_label
-        edit_btn = ctk.CTkButton(tab, text="Edit Action...", width=120,
-                                 command=lambda p=profile_index, k=action_key: self.open_action_editor(p, k))
-        edit_btn.grid(row=row, column=2, sticky="e", padx=10, pady=pady_val)
+        pady = (12 if is_new else (10 if row == 0 else 8), 8)
+        ctk.CTkLabel(tab, text=label_text).grid(row=row, column=0, sticky="w", padx=10, pady=pady)
+        self.profile_vars[profile_index].setdefault(
+            action_key, {"type": "simple", "action": "nothing"})
+        action_obj  = self.profile_vars[profile_index][action_key]
+        display_lbl = ctk.CTkLabel(tab, text=self._action_display_text(action_obj),
+                                   anchor="e", font=ctk.CTkFont(family="Consolas", size=13))
+        display_lbl.grid(row=row, column=1, padx=10, pady=pady, sticky="ew")
+        self.action_labels[profile_index][action_key] = display_lbl
+        ctk.CTkButton(tab, text="Edit Action...", width=120,
+                      command=lambda p=profile_index, k=action_key: self.open_action_editor(p, k)
+                      ).grid(row=row, column=2, sticky="e", padx=10, pady=pady)
 
-    # --- v7.0 Update: Handle 'macro_advanced' ---
-    def _get_action_display_text(self, action_obj):
+    def _action_display_text(self, action_obj):
         try:
-            action_type = action_obj.get("type", "simple")
-            if action_type == "macro_advanced":
+            t = action_obj.get("type", "simple")
+            if t == "macro_advanced":
                 return "Macro: [Advanced Sequence]"
-            elif action_type == "macro":
-                keys = action_obj.get("keys", [])
-                display_keys = [MODIFIER_DISPLAY_MAP.get(k, k.upper()) for k in keys]
-                return f"Macro: {' + '.join(display_keys)}"
-            else:
-                return action_obj.get("action", "nothing")
+            if t == "macro":
+                keys = [MODIFIER_DISPLAY_MAP.get(k, k.upper()) for k in action_obj.get("keys", [])]
+                return "Macro: " + " + ".join(keys)
+            return action_obj.get("action", "nothing")
         except Exception:
             return "Error"
 
-
     def open_action_editor(self, profile_index, action_key):
-        current_action = self.profile_vars[profile_index][action_key]
-        editor_window = ActionEditor(self.root, current_action, profile_index, action_key)
-        self.root.wait_window(editor_window)
-        new_action = editor_window.result
-        if new_action:
-            self.profile_vars[profile_index][action_key] = new_action
-            display_text = self._get_action_display_text(new_action)
-            self.action_labels[profile_index][action_key].configure(text=display_text)
-            
-    # --- RIGHT  ---
+        editor = ActionEditor(self.root, self.profile_vars[profile_index][action_key],
+                              profile_index, action_key)
+        self.root.wait_window(editor)
+        if editor.result:
+            self.profile_vars[profile_index][action_key] = editor.result
+            self.action_labels[profile_index][action_key].configure(
+                text=self._action_display_text(editor.result))
+
+    
     def build_right(self):
-        ctk.CTkLabel(self.right,text="Control & Status",font=ctk.CTkFont(size=14,weight="bold")).pack(pady=(10,6))
-        qf=ctk.CTkFrame(self.right); qf.pack(fill="x",padx=10,pady=(4,8))
-        self.refresh_btn=ctk.CTkButton(qf,text="Find CIRCUITPY",command=self.refresh_thread); self.refresh_btn.pack(fill="x",padx=10,pady=8)
-        self.reboot_port_label=ctk.CTkLabel(qf,text="Reboot port: —",anchor="w"); self.reboot_port_label.pack(fill="x",padx=10,pady=(0,8))
-        lf=ctk.CTkFrame(self.right); lf.pack(fill="both",expand=True,padx=10,pady=4)
-        ctk.CTkLabel(lf,text="Status Log:").pack(anchor="w",padx=10,pady=(8,2))
-        self.log=ctk.CTkTextbox(lf,height=10,wrap="word"); self.log.pack(fill="both",expand=True,padx=10,pady=(0,8))
+        ctk.CTkLabel(self.right, text="Control & Status",
+                     font=ctk.CTkFont(size=14, weight="bold")).pack(pady=(10, 6))
+
+        qf = ctk.CTkFrame(self.right)
+        qf.pack(fill="x", padx=10, pady=(4, 8))
+        self.refresh_btn = ctk.CTkButton(qf, text="Find CIRCUITPY", command=self.refresh_thread)
+        self.refresh_btn.pack(fill="x", padx=10, pady=8)
+        self.reboot_port_label = ctk.CTkLabel(qf, text="Reboot port: —", anchor="w")
+        self.reboot_port_label.pack(fill="x", padx=10, pady=(0, 8))
+
+        lf = ctk.CTkFrame(self.right)
+        lf.pack(fill="both", expand=True, padx=10, pady=4)
+        ctk.CTkLabel(lf, text="Status Log:").pack(anchor="w", padx=10, pady=(8, 2))
+        self.log = ctk.CTkTextbox(lf, height=10, wrap="word")
+        self.log.pack(fill="both", expand=True, padx=10, pady=(0, 8))
         self.log.configure(state="disabled")
-        pf=ctk.CTkFrame(self.right); pf.pack(fill="x",padx=10,pady=(4,8))
-        self.progress=ctk.CTkProgressBar(pf); self.progress.set(0); self.progress.pack(fill="x",padx=10,pady=(10,6))
-        self.save_btn=ctk.CTkButton(pf,text="Save & Reboot Pico",command=self.save_thread)
-        self.save_btn.pack(fill="x",padx=10,pady=(4,10))
 
-    # --- BOTTOM (v7.0) ---
+        pf = ctk.CTkFrame(self.right)
+        pf.pack(fill="x", padx=10, pady=(4, 8))
+        self.progress = ctk.CTkProgressBar(pf)
+        self.progress.set(0)
+        self.progress.pack(fill="x", padx=10, pady=(10, 6))
+        self.save_btn = ctk.CTkButton(pf, text="Save & Reboot Pico", command=self.save_thread)
+        self.save_btn.pack(fill="x", padx=10, pady=(4, 10))
+
     def bottom_bar(self):
-        bar=ctk.CTkFrame(self.root,height=28,corner_radius=0); bar.pack(fill="x",side="bottom")
-        self.status=tk.StringVar(value="Ready (v7.0).")
-        ctk.CTkLabel(bar,textvariable=self.status,anchor="w").pack(side="left",padx=10)
-        ctk.CTkLabel(bar,text="Advanced Macro Edition",anchor="e").pack(side="right",padx=10)
+        bar = ctk.CTkFrame(self.root, height=28, corner_radius=0)
+        bar.pack(fill="x", side="bottom")
+        self.status = tk.StringVar(value="Ready (v7.0).")
+        ctk.CTkLabel(bar, textvariable=self.status, anchor="w").pack(side="left", padx=10)
+        ctk.CTkLabel(bar, text="Advanced Macro Edition", anchor="e").pack(side="right", padx=10)
 
-    # --- Threads  ---
+    
     def save_thread(self):
-        self.save_btn.configure(state="disabled"); self.refresh_btn.configure(state="disabled")
-        threading.Thread(target=self._save_and_reboot,daemon=True).start()
+        self.save_btn.configure(state="disabled")
+        self.refresh_btn.configure(state="disabled")
+        snapshot = {
+            "s_vol":   self._safe_int(self.sens_vol.get(), 2),
+            "s_scr":   self._safe_int(self.sens_scr.get(), 1),
+            "s_mouse": self._safe_int(self.sens_mouse.get(), 4),
+            "p1":      json.loads(json.dumps(self.profile_vars.get(1, {}))),
+            "p2":      json.loads(json.dumps(self.profile_vars.get(2, {}))),
+            "p3":      json.loads(json.dumps(self.profile_vars.get(3, {}))),
+        }
+        threading.Thread(target=self._save_and_reboot, args=(snapshot,), daemon=True).start()
         self.animate_progress()
+
     def refresh_thread(self):
-        threading.Thread(target=self._refresh,daemon=True).start()
+        threading.Thread(target=self._refresh, daemon=True).start()
+
     def animate_progress(self):
         def step():
-            val=self.progress.get()+0.03
-            if val>0.9: val=0.1
+            val = self.progress.get() + 0.03
+            if val > 0.9:
+                val = 0.1
             self.progress.set(val)
-            if str(self.save_btn.cget("state"))=="disabled":
-                self.root.after(120,step)
+            if str(self.save_btn.cget("state")) == "disabled":
+                self.root.after(120, step)
             else:
-                self.progress.set(1.0); self.root.after(700,lambda:self.progress.set(0))
+                self.progress.set(1.0)
+                self.root.after(700, lambda: self.progress.set(0))
         step()
 
-    # --- Logging helpers ---
-    def log_add(self,text):
-        def _():
-            self.log.configure(state="normal"); self.log.insert("end",f"{time.strftime('%H:%M:%S')} — {text}\n")
-            self.log.see("end"); self.log.configure(state="disabled")
-        self.root.after(0,_)
-    def set_status(self,text): self.root.after(0,lambda:self.status.set(text))
+    def log_add(self, text):
+        def _update():
+            self.log.configure(state="normal")
+            self.log.insert("end", f"{time.strftime('%H:%M:%S')} — {text}\n")
+            self.log.see("end")
+            self.log.configure(state="disabled")
+        self.root.after(0, _update)
 
-    # --- SAVE LOGIC ---
-    def _save_and_reboot(self):
+    def set_status(self, text):
+        self.root.after(0, lambda: self.status.set(text))
+
+
+    def _save_and_reboot(self, snap):
+
         try:
-            self.set_status("Finding CIRCUITPY..."); self.log_add("Finding drive...")
+            self.set_status("Finding CIRCUITPY...")
+            self.log_add("Searching for drive...")
             drive = find_circuitpy_drive()
             if not drive:
-                self.log_add("CIRCUITPY not found."); self.set_status("Error: Drive not found")
+                self.log_add("CIRCUITPY not found.")
+                self.set_status("Error: drive not found")
                 self.root.after(0, lambda: messagebox.showerror("Error", "CIRCUITPY drive not found."))
                 return
-            
+
             json_path = os.path.join(drive, "profiles.json")
-            
-            s_vol = self._safe_int(self.sens_vol.get(), 2)
-            s_scr = self._safe_int(self.sens_scr.get(), 1)
-            s_mouse = self._safe_int(self.sens_mouse.get(), 4)
-            
-            # v6.0: profile_vars now contains all 8 keys, so this is fine
-            p1 = self.profile_vars.get(1, {})
-            p2 = self.profile_vars.get(2, {})
-            p3 = self.profile_vars.get(3, {})
-            
+            s_vol   = snap["s_vol"]
+            s_scr   = snap["s_scr"]
+            s_mouse = snap["s_mouse"]
+            p1      = snap["p1"]
+            p2      = snap["p2"]
+            p3      = snap["p3"]
+
             cur_prof = 1
             if os.path.exists(json_path):
                 try:
                     with open(json_path, "r", encoding="utf-8") as f:
                         cur_prof = json.load(f).get("current_profile", 1)
-                except: pass
-                
-            
+                except Exception:
+                    pass
+
             cfg = {
-                "current_profile": cur_prof,
+                "current_profile":    cur_prof,
                 "sensitivity_volume": s_vol,
                 "sensitivity_scroll": s_scr,
-                "sensitivity_mouse": s_mouse,
-                "profiles": [p1, p2, p3] # These dicts now contain all 8 keys
+                "sensitivity_mouse":  s_mouse,
+                "profiles":           [p1, p2, p3],
             }
-            
+
             with open(json_path, "w", encoding="utf-8") as f:
                 json.dump(cfg, f, indent=2, ensure_ascii=False)
-            
-            # Save all 8 keys to the local cache too
+                f.flush()
+                os.fsync(f.fileno())
+
             self.save_gui_settings(p1, p2, p3, s_vol, s_scr, s_mouse)
-            self.log_add("File saved."); self.set_status("Finishing write...")
-            
-            time.sleep(2.0)
-            
+            self.log_add("File saved and flushed to device.")
+            self.set_status("Finishing write...")
+
+
+            time.sleep(0.5)
+
             port = find_pico_serial_port_for_reboot()
             if port:
-                self.reboot_port_label.configure(text=f"Reboot port: {port}")
-                self.log_add(f"Rebooting via {port}..."); self.set_status("Sending reboot...")
-                ok = send_reboot_command(port)
-                if ok:
-                    self.log_add("Reboot successful."); self.set_status("Complete.")
+                self.root.after(0, lambda: self.reboot_port_label.configure(text=f"Reboot port: {port}"))
+                self.log_add(f"Rebooting via {port}...")
+                self.set_status("Sending reboot...")
+                if send_reboot_command(port):
+                    self.log_add("Reboot command sent.")
+                    self.set_status("Complete.")
                     self.root.after(0, lambda: messagebox.showinfo("Success", "Saved & Rebooted!"))
                 else:
-                    self.log_add("Failed to send reboot command."); self.set_status("Manual reboot required.")
-                    self.root.after(0, lambda: messagebox.showwarning("Warning", "Saved, but failed to send the reboot command."))
+                    self.log_add("Failed to send reboot command.")
+                    self.set_status("Manual reboot required.")
+                    self.root.after(0, lambda: messagebox.showwarning(
+                        "Warning", "Saved, but failed to send the reboot command.\n"
+                        "Unplug and replug the Pico to apply settings."))
             else:
-                self.log_add("Reboot port not found (as expected)."); self.set_status("Complete.")
-                self.root.after(0, lambda: messagebox.showinfo("Success", "Settings saved!\nThe Pico will apply them on its next reboot."))
-        except Exception as e:
-            self.log_add(f"Error: {e}"); self.set_status("Write Error")
-            self.root.after(0, lambda: messagebox.showerror("Error", f"{e}"))
-        finally:
-            self.root.after(0, lambda: self.save_btn.configure(state="normal"))
-            self.root.after(0, lambda: self.refresh_btn.configure(state="normal"))
+                self.log_add("Serial port not found.")
+                self.set_status("Complete.")
+                self.root.after(0, lambda: messagebox.showinfo(
+                    "Success", "Settings saved!\nThe Pico will apply them on its next reboot."))
 
-    # --- REFRESH  ---
+        except Exception as e:
+            self.log_add(f"Error: {e}")
+            self.set_status("Write Error")
+            self.root.after(0, lambda: messagebox.showerror("Error", str(e)))
+        finally:
+
+            try:
+                self.root.after(0, lambda: self.save_btn.configure(state="normal"))
+                self.root.after(0, lambda: self.refresh_btn.configure(state="normal"))
+            except Exception:
+                pass
+
     def _refresh(self):
         self.set_status("Searching...")
-        drive=find_circuitpy_drive()
-        self.log_add(f"Drive: {drive if drive else '—'}")
-        port=find_pico_serial_port_for_reboot()
-        self.root.after(0,lambda:self.reboot_port_label.configure(text=f"Reboot port: {port if port else '—'}"))
+        drive = find_circuitpy_drive()
+        self.log_add(f"Drive: {drive if drive else '— (not found)'}")
+        port  = find_pico_serial_port_for_reboot()
+        self.root.after(0, lambda: self.reboot_port_label.configure(
+            text=f"Reboot port: {port if port else '—'}"))
         self.set_status("Ready.")
 
-    # --- Helpers ---
+
     @staticmethod
     def _safe_int(v, default):
-        try: return int(v)
-        except: return default
-    
-    # save_gui_settings is unchanged, as p1,p2,p3 already contain the new keys
+        try:
+            return int(v)
+        except Exception:
+            return default
+
     def save_gui_settings(self, p1, p2, p3, sv, ss, sm):
         data = {
-            'profile1': p1, 'profile2': p2, 'profile3': p3,
-            'sensitivity_volume': sv, 'sensitivity_scroll': ss,
-            'sensitivity_mouse': sm
+            "profile1": p1, "profile2": p2, "profile3": p3,
+            "sensitivity_volume": sv, "sensitivity_scroll": ss, "sensitivity_mouse": sm,
         }
         try:
             with open("configurator_settings.json", "w", encoding="utf-8") as f:
@@ -594,105 +601,78 @@ class MultiKnobConfiguratorModern:
         except Exception as e:
             self.log_add(f"Error saving GUI settings: {e}")
 
-    # load_gui_settings now loads defaults for 8 keys
     def load_gui_settings(self):
-        # Define the full default profile
-        default_p_base = {
-            'cw': DEFAULT_ACTION_OBJECT, 'ccw': DEFAULT_ACTION_OBJECT,
-            'click': DEFAULT_ACTION_OBJECT,
-            'double_click': DEFAULT_ACTION_OBJECT, # New
-            'triple_click': DEFAULT_ACTION_OBJECT, # New
-            'long_press': DEFAULT_ACTION_OBJECT,
-            'cw_shifted': DEFAULT_ACTION_OBJECT, 'ccw_shifted': DEFAULT_ACTION_OBJECT
-        }
-        
-        # Create specific defaults
-        default_p1 = default_p_base.copy()
-        default_p1.update({'cw': {'type': 'simple', 'action': 'volume_up'}, 'ccw': {'type': 'simple', 'action': 'volume_down'}, 'click': {'type': 'simple', 'action': 'mute'}, 'long_press': {'type': 'simple', 'action': 'next_profile'}})
-        
-        default_p2 = default_p_base.copy()
-        default_p2.update({'cw': {'type': 'simple', 'action': 'scroll_up'}, 'ccw': {'type': 'simple', 'action': 'scroll_down'}, 'click': {'type': 'simple', 'action': 'play_pause'}})
-        
-        default_p3 = default_p_base.copy()
-        default_p3.update({'cw': {"type": "simple", "action": "mouse_scroll_v_pos"}, 'ccw': {"type": "simple", "action": "mouse_scroll_v_neg"}, 'click': {"type": "simple", "action": "mouse_click_middle"}, 'cw_shifted': {"type": "simple", "action": "mouse_scroll_h_pos"}, 'ccw_shifted': {"type": "simple", "action": "mouse_scroll_h_neg"}})
-        
-        
-        d = {
-            'profile1': default_p1, 'profile2': default_p2, 'profile3': default_p3,
-            'sensitivity_volume': 2, 'sensitivity_scroll': 1,
-            'sensitivity_mouse': 4
-        }
-        
+
+        def _noop():
+            return {"type": "simple", "action": "nothing"}
+
+        def _fresh_base():
+            return {k: _noop() for k in _ALL_GESTURE_KEYS}
+
+        p1 = {**_fresh_base(),
+              "cw":         {"type": "simple", "action": "volume_up"},
+              "ccw":        {"type": "simple", "action": "volume_down"},
+              "click":      {"type": "simple", "action": "mute"},
+              "long_press": {"type": "simple", "action": "next_profile"}}
+        p2 = {**_fresh_base(),
+              "cw":    {"type": "simple", "action": "scroll_up"},
+              "ccw":   {"type": "simple", "action": "scroll_down"},
+              "click": {"type": "simple", "action": "play_pause"}}
+        p3 = {**_fresh_base(),
+              "cw":          {"type": "simple", "action": "mouse_scroll_v_pos"},
+              "ccw":         {"type": "simple", "action": "mouse_scroll_v_neg"},
+              "click":       {"type": "simple", "action": "mouse_click_middle"},
+              "cw_shifted":  {"type": "simple", "action": "mouse_scroll_h_pos"},
+              "ccw_shifted": {"type": "simple", "action": "mouse_scroll_h_neg"}}
+        d = {"profile1": p1, "profile2": p2, "profile3": p3,
+             "sensitivity_volume": 2, "sensitivity_scroll": 1, "sensitivity_mouse": 4}
+
         try:
             with open("configurator_settings.json", "r", encoding="utf-8") as f:
-                loaded_data = json.load(f)
-                
-                # Check what version the config is and migrate if needed
-                if isinstance(loaded_data.get('profile1', {}).get('cw'), str):
-                    self.log_add("Old v1.0 config found. Migrating to v4.0...")
-                    d = self._migrate_v1_to_v4(loaded_data)
-                elif 'cw_shifted' not in loaded_data.get('profile1', {}):
-                    self.log_add("v2.0 (Mouse) config found. Migrating to v4.0 (Shift+MultiClick)...")
-                    d.update(loaded_data) # Load v2 data
-                    # Add new keys to profiles
-                    for i in (1, 2, 3):
-                        d[f'profile{i}'].setdefault('cw_shifted', DEFAULT_ACTION_OBJECT)
-                        d[f'profile{i}'].setdefault('ccw_shifted', DEFAULT_ACTION_OBJECT)
-                        d[f'profile{i}'].setdefault('double_click', DEFAULT_ACTION_OBJECT)
-                        d[f'profile{i}'].setdefault('triple_click', DEFAULT_ACTION_OBJECT)
-                elif 'double_click' not in loaded_data.get('profile1', {}):
-                    self.log_add("v3.0 (Shift) config found. Migrating to v4.0 (MultiClick)...")
-                    d.update(loaded_data) # Load v3 data
-                    # Add new keys to profiles
-                    for i in (1, 2, 3):
-                        d[f'profile{i}'].setdefault('double_click', DEFAULT_ACTION_OBJECT)
-                        d[f'profile{i}'].setdefault('triple_click', DEFAULT_ACTION_OBJECT)
-                else:
-                    d.update(loaded_data)
-                    self.log_add("Loaded v4.0+ (MultiClick / Adv. Macro) config settings.") # v7.0 Log
-                    
+                loaded = json.load(f)
+
+            p1_loaded = loaded.get("profile1", {})
+            if isinstance(p1_loaded.get("cw"), str):
+                self.log_add("Old v1.0 config detected — migrating to v4.0...")
+                d = self._migrate_v1_to_v4(loaded)
+            elif "cw_shifted" not in p1_loaded:
+                self.log_add("v2.0 config detected — migrating to v4.0...")
+                d.update(loaded)
+                for i in (1, 2, 3):
+                    for k in ("cw_shifted", "ccw_shifted", "double_click", "triple_click"):
+                        d[f"profile{i}"].setdefault(k, {"type": "simple", "action": "nothing"})
+            elif "double_click" not in p1_loaded:
+                self.log_add("v3.0 config detected — migrating to v4.0...")
+                d.update(loaded)
+                for i in (1, 2, 3):
+                    for k in ("double_click", "triple_click"):
+                        d[f"profile{i}"].setdefault(k, {"type": "simple", "action": "nothing"})
+            else:
+                d.update(loaded)
+                self.log_add("Loaded v4.0+ (Advanced Macro) config.")
         except FileNotFoundError:
-            self.log_add("No settings file found. Loading defaults.")
+            self.log_add("No settings file found — loading defaults.")
         except Exception as e:
-            self.log_add(f"Error loading settings: {e}. Loading defaults.")
+            self.log_add(f"Error loading settings: {e} — loading defaults.")
         return d
 
-    # v6.0: This migrates from the very first version (v1) to v4 (multi-click)
-    def _migrate_v1_to_v4(self, v1_data):
-        v4_data = {
-            'sensitivity_volume': v1_data.get('sensitivity_volume', 2),
-            'sensitivity_scroll': v1_data.get('sensitivity_scroll', 1),
-            'sensitivity_mouse': 4 # Add mouse default
+    def _migrate_v1_to_v4(self, v1):
+        result = {
+            "sensitivity_volume": v1.get("sensitivity_volume", 2),
+            "sensitivity_scroll": v1.get("sensitivity_scroll", 1),
+            "sensitivity_mouse":  4,
         }
-        
         for i in (1, 2, 3):
-            profile_key = f'profile{i}'
-            v1_profile = v1_data.get(profile_key, {})
-            v4_profile = {}
-            for action_key in ("cw", "ccw", "click", "long_press"):
-                action_name = v1_profile.get(action_key, "nothing")
-                v4_profile[action_key] = {
-                    "type": "simple",
-                    "action": action_name
-                }
-            # Add new shift keys
-            v4_profile['cw_shifted'] = DEFAULT_ACTION_OBJECT
-            v4_profile['ccw_shifted'] = DEFAULT_ACTION_OBJECT
-            # Add new multi-click keys
-            v4_profile['double_click'] = DEFAULT_ACTION_OBJECT
-            v4_profile['triple_click'] = DEFAULT_ACTION_OBJECT
-            
-            v4_data[profile_key] = v4_profile
-            
-        return v4_data
+            old = v1.get(f"profile{i}", {})
+            new = {k: {"type": "simple", "action": old.get(k, "nothing")}
+                   for k in ("cw", "ccw", "click", "long_press")}
+            for k in ("cw_shifted", "ccw_shifted", "double_click", "triple_click"):
+                new[k] = {"type": "simple", "action": "nothing"}
+            result[f"profile{i}"] = new
+        return result
 
-# --- Run ---
+
 if __name__ == "__main__":
-    if sys.platform == "win32":
-        try:
-            import win32api
-        except:
-            pass
     root = ctk.CTk()
-    app = MultiKnobConfiguratorModern(root)
+    app  = MultiKnobConfiguratorModern(root)
     root.mainloop()
